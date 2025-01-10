@@ -1,16 +1,16 @@
 #include "actions_staeckel.h"
 #include "orbit.h"
+#include "actions_newtorus.h"
+#include "potential_factory.h"
+#include "units.h"
+
 #include <vector>
 #include <iomanip>
-#include "actions_newtorus.h"
-#include "potential_composite.h"
-#include "potential_factory.h"
-#include "potential_analytic.h"
-#include "units.h"
 #include <chrono>
 #include <iostream>
 #include <fstream>
-#include <stdio.h>const units::InternalUnits unit(units::galactic_Myr);
+#include <stdio.h>
+const units::InternalUnits unit(units::galactic_Myr);
 /*To get torus code you first need to get a pointer to the potential with ptrpotential. Then you need to initialise a Torus Generator from that pterpotential 
 and action finder. Then intiialise the class actionfinderTG, and AFTG.actionagnles(xv) where xv is posvelcyl coordinates wil get angle action coordinates.
 The code:
@@ -30,6 +30,7 @@ int main() {
     double ar = 2, az = .5, arp = -ar, azp = M_PI - az;
     actions::Torus T(TG.fitTorus(J));
     actions::Angles theta(1.0, 1.3, 1.3);
+ //Torus map J and theta to some momentum position.
     coord::PosMomCyl xp = T.from_true(theta);
     
     coord::PosVelCyl xv(xp.R, xp.z, xp.phi, xp.pR, xp.pz, xp.pphi / xp.R);
@@ -53,7 +54,6 @@ int main() {
         
         actions::ActionAngles aa1 = AFTG.actionAngles(pv1);
         actions::Actions JS = AF.actions(pv1);
-        std::cout << i << '\n';
         file << aa1.Jr << " " << aa1.Jz << " "<<aa1.thetar<<" "<<aa1.thetaz<<" " << JS.Jr << " " << JS.Jz  << " " <<traj[i].second << '\n';
     }
     file.close();
