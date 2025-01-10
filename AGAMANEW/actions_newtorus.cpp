@@ -1494,16 +1494,6 @@ namespace actions {
 		}
 		return Tgrd;
 	}
-	//start fromT
-	EXP Actions ActionFinderTG::actions(const coord::PosVelCyl& point) const {
-		double E = potential::totalEnergy(*pot, point);
-		if (E > 0) {
-			printf("Energy is: %f and positive so no orbit\n", E);
-			return ActionAngles(actions::Actions(NAN, NAN, NAN), actions::Angles(NAN, NAN, NAN));
-		}
-		ActionAngles aa = actionAngles(point);
-		return Actions(aa.Jr, aa.Jz, aa.Jphi);
-	}
 	EXP ActionAngles ActionFinderTG::actionAngles(const coord::PosVelCyl& point, Frequencies* freq) const {
 		double E = potential::totalEnergy(*pot, point);
 		if (E > 0) {
@@ -1529,7 +1519,7 @@ namespace actions {
 			if (diff < tol || kount>10) {
 				trueA = T.GF.trueA(aT);
 				if (freq) {
-					freq = &T.freqs;
+					*freq = T.freqs;
 				}
 				break;
 			}
@@ -1558,7 +1548,7 @@ namespace actions {
 			else {
 				J.Jr += dJt[3];
 			}if (fabs(dJt[4]) > 0.2 * J.Jz) {
-				J.Jr *= (1 + math::sign(dJt[4]) * 0.2);
+				J.Jz *= (1 + math::sign(dJt[4]) * 0.2);
 			}
 			else {
 				J.Jz += dJt[4];
