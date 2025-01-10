@@ -11,7 +11,15 @@
 #include <iostream>
 #include <fstream>
 #include <stdio.h>const units::InternalUnits unit(units::galactic_Myr);
+/*To get torus code you first need to get a pointer to the potential with ptrpotential. Then you need to initialise a Torus Generator from that pterpotential 
+and action finder. Then intiialise the class actionfinderTG, and AFTG.actionagnles(xv) where xv is posvelcyl coordinates wil get angle action coordinates.
+The code:
 
+actions::Frequencies f;
+actions::ActionAngles aa=AFTG.actionAngles(xv,&f);
+
+will get the frequencies as a class f (storing f.omegar,f.omegaz,f.omegaphi) and action angles aa.
+  */
 int main() {
   //NFW potential with q=0.5
     potential::PtrPotential pot = potential::createPotential(utils::KeyValueMap("type=spheroid, gamma=1, beta=3,alpha=1, scaleradius=1,densityNorm=0.1, q=0.5"));
@@ -36,8 +44,10 @@ int main() {
     std::vector<double> JTGr(traj.size(), 0.0);std::vector<double> Jrs(traj.size(), 0.0);
     std::ofstream file;
     actions::ActionFinderTG AFTG(pot, AF, TG);
+  //rewrites or writes new text file in the diretory titled File6.dat containing angle and action information.
     file.open("File6.dat");
     file << "Jr Jz thetar thetaz Jrs Jzs time"<<'\n';
+  
     for (int i = 0;i < traj.size();i++) {
         coord::PosVelCyl pv1 = traj[i].first;
         
