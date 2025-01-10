@@ -296,9 +296,11 @@ namespace actions {
 			pot(_pot), AF(_AF), TG(_TG) {
 		}
 		//virtual Actions actions(const coord::PosMomCyl& point) const;
-		virtual Actions actions(const coord::PosVelCyl& point) const;
-		virtual ActionAngles actionAngles(const coord::PosVelCyl& point, Frequencies* freq = NULL) const;
-
+		virtual ActionAngles actionAngles(const coord::PosVelCyl& point,
+			Frequencies* freq = NULL) const;
+		virtual Actions actions(const coord::PosVelCyl& point) const {
+			return Actions(actionAngles(point));
+		}
 	};
 
 }//namespace actions
