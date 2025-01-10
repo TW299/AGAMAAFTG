@@ -1518,6 +1518,9 @@ namespace actions {
 			//printf("diff %g\n",diff);
 			if (diff < tol || kount>10) {
 				trueA = T.GF.trueA(aT);
+				trueA.thetar = math::wrapAngle(trueA.thetar);
+				trueA.thetaz = math::wrapAngle(trueA.thetaz);
+				trueA.thetaphi = math::wrapAngle(trueA.thetaphi);
 				if (freq) {
 					*freq = T.freqs;
 				}
@@ -1542,6 +1545,9 @@ namespace actions {
 			math::LUDecomp LUM(M);
 			std::vector<double> dJt = LUM.solve(dRp);
 			aT.thetar += dJt[0]; aT.thetaz += dJt[1]; aT.thetaphi += dJt[2];
+			aT.thetaphi = math::wrapAngle(aT.thetaphi);
+			aT.thetaz = math::wrapAngle(aT.thetaz);
+			aT.thetar = math::wrapAngle(aT.thetar);
 			if (fabs(dJt[3]) > 0.2 * J.Jr) {
 				J.Jr *= (1 + math::sign(dJt[3]) * 0.2);
 			}
