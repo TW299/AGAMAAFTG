@@ -1,5 +1,5 @@
 A.cpp contains example code for potential used.
 File.dat is a data file containing angle actions I got for Jr=0.05,Jz=0.55, Jphi=0.2, and thetar=1.0,thetaz=1.3 and thetaphi=1.3 . 
-This was torus mapped to get psotion momentum coordinates and AGAMA numerically integrated this to get trajectory at different points.
+This was torus mapped to get position momentum coordinates and AGAMA numerically integrated this to get trajectory at different points.
 The data file contains the angle actions from the staeckel and torus action finder. The names at the top show what each column is with
 Jrs, Jzs being Staeckel while the other are torus action finder.
