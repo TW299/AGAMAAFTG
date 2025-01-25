@@ -33,6 +33,7 @@ namespace actions {
 			//X=(eta-thetar)*(1+boc)/(u+boc);
 			X = sneta / (u + boc);//avoid division by e
 			for (int i = 0; i < 3; i++) {
+				//detadJ[i] = X * (dedJ[i] -e * boc / (1 + boc) * dlncdJ[i]);
 				detadJ[i] = X * (dedJ[i] + e * boc / (1 + boc) * dlncdJ[i]);
 				dudJ[i] = e * sneta * detadJ[i] - cseta * dedJ[i];
 			}
@@ -41,24 +42,28 @@ namespace actions {
 			double dadJ[3], dapdJ[3];
 			for (int i = 0; i < 3; i++) {
 				dadJ[i] = X * dedJ[i];
-				dapdJ[i] = Y * ((1 + 2 * boc) * dedJ[i] - 2 * e * boc * dlncdJ[i]);
+				dapdJ[i] = Y * ((1 + 2 * boc) * dedJ[i] +2 * e * boc * dlncdJ[i]);
 			}
-			X = 1 / (1 + pow_2(a * tnheta)); Y = .5 * a / pow_2(csheta);
+			X = 1.0 / (1.0 + pow_2(a * tnheta)); Y = .5 * a / pow_2(csheta);
 			double dfadJ[3], dfapdJ[3];
 			for (int i = 0; i < 3; i++)
 				dfadJ[i] = X * (tnheta * dadJ[i] + Y * detadJ[i]);
-			X = 1 / (1 + pow_2(ap * tnheta)); Y = .5 * ap / pow_2(csheta);
+			X = 1.0 / (1.0 + pow_2(ap * tnheta)); Y = .5 * ap / pow_2(csheta);
 			for (int i = 0; i < 3; i++)
 				dfapdJ[i] = X * (tnheta * dapdJ[i] + Y * detadJ[i]);
 			double dfratdL = 2 * pow_2(Js / L) / pow(1 + 4 * pow_2(Js / L), 1.5) / L;
-			X = 2 * atan(ap * tnheta) - thetar; Y = 2 * frat - 1;
+			X = 2 * atan(ap * tnheta) - thetar; Y = 2 * frat - 1.0;
 			for (int i = 0; i < 3; i++)
 				dpsidJ[i] = dfadJ[i] + Y * dfapdJ[i];
 			for (int i = 1;i < 3;i++)
 				dpsidJ[i] += X * dfratdL;
-			dchidJ[0] = fabs(Jphi) / L * dpsidJ[0];
-			dchidJ[1] = -fabs(Jphi) / pow_2(L) * snpsi * cspsi + fabs(Jphi) / L * dpsidJ[1];
-			dchidJ[2] = (signJphi / L - fabs(Jphi) / pow_2(L)) * snpsi * cspsi + fabs(Jphi) / L * dpsidJ[2];
+			
+			dchidJ[0] = fabs(Jphi) / (L*(pow_2(cspsi) + pow_2(Jphi / L * snpsi)))*dpsidJ[0];
+			dchidJ[1] = fabs(Jphi) /(L*(pow_2(cspsi) + pow_2(Jphi / L * snpsi)))*(-snpsi * cspsi/L + dpsidJ[1]);
+			dchidJ[2] = 1 / (L * (pow_2(cspsi) + pow_2(Jphi / L * snpsi))) * (snpsi * cspsi*(signJphi-fabs(Jphi)/L) + fabs(Jphi)*dpsidJ[2]);
+			//dchidJ[0] =  fabs(Jphi) / L * dpsidJ[0];
+			//dchidJ[1] = -fabs(Jphi) / pow_2(L) * snpsi * cspsi + fabs(Jphi) / L * dpsidJ[1];
+			//dchidJ[2] = (signJphi / L - fabs(Jphi) / pow_2(L)) * snpsi * cspsi + fabs(Jphi) / L * dpsidJ[2];
 		}
 		void Is_Horse::derivs2(double* dlncdJ, double* dedJ, double* detadJ,
 			double* dudJ, double* dpsidJ, double* dchidJ,
@@ -96,11 +101,11 @@ namespace actions {
 			signJphi = Jphi > 0 ? 1 : -1;
 			L = Jz + fabs(Jphi);
 			cosi = Jphi / L; sini = sqrt(1 - cosi * cosi);
-			Ls = sqrt(L * L + 4 * Js2);
+			Ls = sqrt(L * L + 4.0 * Js2);
 			double bot = aa.Jr + .5 * (L + Ls);
 			H = -.5 * Js4 / b2 / pow_2(bot);
 			Omegar = Js4 / b2 / pow(bot, 3);
-			frat = .5 * (1 + L / Ls);
+			frat = .5 * (1.0 + L / Ls);
 			Omegaphi = frat * Omegar;
 			if (freqs) {
 				freqs->Omegar = Omegar;
