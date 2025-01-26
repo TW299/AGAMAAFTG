@@ -41,7 +41,7 @@ int main() {
     double duration = 2 * M_PI * 2 / f.Omegar;
     std::cout << duration << '\n';
     double dt = duration/N;
-    std::vector<std::pair<coord::PosVelCyl, double> > traj(T.orbit(theta, dt, duration));
+    std::vector<std::pair<coord::PosVelCyl, double> > traj(orbit::integrateTraj(xv,duration,dt,*pot));
     std::vector<double> JTGr(traj.size(), 0.0);std::vector<double> Jrs(traj.size(), 0.0);
     std::ofstream file;
     actions::ActionFinderTG AFTG(pot, AF, TG);
