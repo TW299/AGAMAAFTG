@@ -24,10 +24,9 @@ int main() {
   //NFW potential with q=0.5
     potential::PtrPotential pot = potential::createPotential(utils::KeyValueMap("type=spheroid, gamma=1, beta=3,alpha=1, scaleradius=1,densityNorm=0.1, q=0.5"));
   //second variable is tolerance of J
-    const actions::TorusGenerator TG(*pot, 1e-6);
+    const actions::TorusGenerator TG(*pot, 1e-7);
     double Jr = 0.1, Jz = 0.55, Jphi = 3.0;
     actions::Actions J(Jr, Jz, Jphi);
-    double ar = 2, az = .5, arp = -ar, azp = M_PI - az;
     actions::Torus T(TG.fitTorus(J));
     actions::Angles theta(1.0, 1.3, 1.3);
  //Torus map J and theta to some momentum position.
@@ -38,7 +37,7 @@ int main() {
     const actions::ActionFinderAxisymFudge AF(pot);
     actions::Frequencies f = T.freqs;
     int N = 200;
-    double duration = 2 * M_PI * 2 / f.Omegar;
+    double duration = 2 * M_PI * 11 / f.Omegar;
     std::cout << duration << '\n';
     double dt = duration/N;
     std::vector<std::pair<coord::PosVelCyl, double> > traj(orbit::integrateTraj(xv,duration,dt,*pot));
@@ -47,14 +46,15 @@ int main() {
     actions::ActionFinderTG AFTG(pot, AF, TG);
   //rewrites or writes new text file in the diretory titled File6.dat containing angle and action information.
     file.open("File6.dat");
-    file << "Jr Jz thetar thetaz Jrs Jzs time"<<'\n';
+    file << "Jr Jz thetar thetaz omegar omegaz Jrs Jzs thetasr thetasz omegasr omegasz time"<<'\n';
   
     for (int i = 0;i < traj.size();i++) {
         coord::PosVelCyl pv1 = traj[i].first;
-        
         actions::ActionAngles aa1 = AFTG.actionAngles(pv1);
         actions::Actions JS = AF.actions(pv1);
-        file << aa1.Jr << " " << aa1.Jz << " "<<aa1.thetar<<" "<<aa1.thetaz<<" " << JS.Jr << " " << JS.Jz  << " " <<traj[i].second << '\n';
+        file << aa[i].Jr << " " << aa[i].Jz << " " <<aa[i].thetar<<" "<<aa[i].thetaz<<" "<< f1.Omegar << " " << f1.Omegaz << " " 
+    << JS.Jr << " " << JS.Jz <<" "<<JS.thetar<<" "<<JS.thetaz<<" " << f2.Omegar << " " << f2.Omegaz  << " "
+    <<traj[i].second << '\n';
     }
     file.close();
     return 0;
