@@ -218,6 +218,9 @@ namespace actions {
 			Torus(T), pH(_pH) {
 			//printf("eTorus at E = %f created: %d terms in pH\n",T.E, pH.numTerms());
 		}
+		PerturbingHamiltonian Hns() const {
+			return pH;
+		}
 		std::vector<std::complex<double> > get_hn(const GenFncIndex& Indx, std::vector<float>& multiples) const {
 			return pH.get_hn(Indx, multiples);
 		}
@@ -275,6 +278,7 @@ namespace actions {
 		 * dispersion in H < tol*freqScale*Jtotal */
 		TorusGenerator(const potential::BasePotential& _pot, const double _tol = 1e-9);
 		Torus fitTorus(const Actions&, const double tighten = 1) const;
+		Torus fitFrom(const Actions&, const Torus&, const double tighten = 1) const;
 		eTorus fiteTorus(const Actions&, const potential::BasePotential* _addPhi = NULL);
 		eTorus fiteTorus(const Actions&, const double, const potential::BasePotential* _addPhi = NULL);
 		double getDelta(double&, double&);
@@ -301,6 +305,7 @@ namespace actions {
 		virtual Actions actions(const coord::PosVelCyl& point) const {
 			return Actions(actionAngles(point));
 		}
+		virtual ActionAngles actionAngles2(const coord::PosVelCyl& point, Frequencies* freq = NULL) const;
 	};
 
 }//namespace actions
