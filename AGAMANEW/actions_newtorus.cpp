@@ -1609,16 +1609,15 @@ namespace actions {
 		Angles trueA;
 		ActionAngles aa(AF.actionAngles(point));
 		Actions J(aa);
-		Torus T1(TG.fitTorus(J));
-		Angles aT = T1.GF.toyA(aa);
+		Torus T(TG.fitTorus(J));
+		Angles aT = T.GF.toyA(aa);
 		std::vector<double> rep;
 		int kount = 0;
 		while (kount < 10) {
-			/*if (kount == 1) {
+			if (kount == 1) {
 				T = Torus(TG.fitTorus(J));
 			}
-			else if (kount > 0) T = TG.fitFrom(J, T);*/
-			Torus T(TG.fitTorus(J));
+			else if (kount > 0) T = TG.fitFrom(J, T);
 			coord::PosMomCyl P(T.from_toy(aT));
 			double phi_diff = P0.phi - P.phi;
 			if (fabs(phi_diff) > M_PI) {
