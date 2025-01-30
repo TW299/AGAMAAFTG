@@ -1583,7 +1583,7 @@ namespace actions {
 			math::blas_dgemv(math::CblasTrans, 1.0, inv, df, 0.0, dJt);
 			//std::vector<double> dJt = LUM.solve(df);
 			diff = sqrt(pow_2(dJt[0]) + pow_2(dJt[1]));
-			J.Jr += dJt[0]; J.Jz += dJt[1];J.Jr += dJt[2];
+			J.Jr += dJt[0]; J.Jz += dJt[1];J.Jphi += dJt[2];
 			if (sqrt(pow_2(dJt[0]) + pow_2(dJt[1])) < tol) {
 				if(kount>0) {
 					if (freq) *freq = T.freqs;
