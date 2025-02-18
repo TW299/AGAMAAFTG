@@ -24,7 +24,7 @@ int main() {
   //NFW potential with q=0.5
     potential::PtrPotential pot = potential::createPotential(utils::KeyValueMap("type=spheroid, gamma=1, beta=3,alpha=1, scaleradius=1,densityNorm=0.1, q=0.5"));
   //second variable is tolerance of J
-    const actions::TorusGenerator TG(*pot, 1e-7);
+    const actions::TorusGenerator TG(*pot, 1e-3);
     double Jr = 0.1, Jz = 0.55, Jphi = 3.0;
     actions::Actions J(Jr, Jz, Jphi);
     actions::Torus T(TG.fitTorus(J));
@@ -47,7 +47,8 @@ int main() {
   //rewrites or writes new text file in the diretory titled File6.dat containing angle and action information.
     file.open("File6.dat");
     file << "Jr Jz thetar thetaz omegar omegaz Jrs Jzs thetasr thetasz omegasr omegasz time"<<'\n';
-  
+//very slow-you shoud parallel it as I have by:
+ //#pragma omp parallel for
     for (int i = 0;i < traj.size();i++) {
         coord::PosVelCyl pv1 = traj[i].first;
         actions::ActionAngles aa1 = AFTG.actionAngles(pv1);
