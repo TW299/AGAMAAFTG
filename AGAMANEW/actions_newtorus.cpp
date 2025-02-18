@@ -897,7 +897,7 @@ namespace actions {
 		coord::PosUVSph uv(asinh(rtheta.r / cs.Delta), rtheta.theta, rtheta.phi, cs);
 		double chu = cosh(uv.u), shu = sinh(uv.u);
 		double chu2 = 2 * chu * chu - 1, shu2 = 2 * shu * chu;
-		double csv2 = 2 * csv - 1, sinv2 = 2 * snv * csv;
+		double csv2 = 2 * csv*csv - 1, sinv2 = 2 * snv * csv;
 		double dudr = 1 / (cs.Delta * chu);
 		double dRdu = cs.Delta * chu * snv, dRdv = cs.Delta * shu * csv;
 		double dzdu = cs.Delta * shu * csv, dzdv = -cs.Delta * chu * snv;
