@@ -1427,7 +1427,7 @@ namespace actions {
 			torusFitter TF(J, pot, Is, cs, GFF);
 			try {
 				int numIter = math::nonlinearMultiFit(TF, &params[0], tolerance, maxNumIter, &params[0]);
-				Hdisp = TF.computeHamiltonianDisp(params, Hbar);
+				Hdisp = sqrt(TF.computeHamiltonianDisp(params, Hbar));
 				rep.push_back(Hdisp);
 				converged = (Hdisp < tol * freqScale * Jscale);
 				if (TF.giveNANfrac() != 0)
@@ -1475,7 +1475,7 @@ namespace actions {
 			torusFitter TF(J, pot, Is, cs, GFF);
 			try {
 				int numIter = math::nonlinearMultiFit(TF, &params[0], tolerance, maxNumIter, &params[0]);
-				Hdisp = TF.computeHamiltonianDisp(params, Hbar);
+				Hdisp = sqrt(TF.computeHamiltonianDisp(params, Hbar));
 				rep.push_back(Hdisp);
 				converged = (Hdisp < tol * freqScale * Jscale);
 				if (TF.giveNANfrac() != 0)
