@@ -76,7 +76,7 @@ EXP void linearMultiFit(const IMatrixDense<double>& coefs, const std::vector<dou
     \return     the number of iterations taken.
 */
 EXP int nonlinearMultiFit(const IFunctionNdimDeriv& F, const double xinit[],
-    const double relToler, const int maxNumIter, double result[]);
+    const double relToler, const int maxNumIter, double result[],double* resid=0);
 
 ///@}
 /// \name ------ multidimensional root-finding -------
