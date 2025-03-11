@@ -256,7 +256,7 @@ void linearMultiFit(const IMatrixDense<double>& coefs, const std::vector<double>
 
 // ----- nonlinear least-square fit ----- //
 int nonlinearMultiFit(const IFunctionNdimDeriv& F, const double xinit[],
-    const double relToler, const int maxNumIter, double result[])
+    const double relToler, const int maxNumIter, double result[],double *resid)
 {
     const unsigned int Nparam = F.numVars();   // number of parameters to vary
     const unsigned int Ndata  = F.numValues(); // number of data points to fit
@@ -298,6 +298,7 @@ int nonlinearMultiFit(const IFunctionNdimDeriv& F, const double xinit[],
 #endif
         carryon &= params.numCalls < maxNumIter;
         // store the current result and test for convergence
+        
         converged = true;
         for(unsigned int i=0; i<Nparam; i++) {
             converged &= fabs(data[i] - result[i]) <= relToler * fabs(data[i]);
@@ -306,7 +307,15 @@ int nonlinearMultiFit(const IFunctionNdimDeriv& F, const double xinit[],
     }
     if(!converged)
         params.numCalls *= -1;  // signal of non-convergence
-#ifndef HAVE_EIGEN
+    gsl_vector* resids = solver->f;
+    if (resid) {
+        *resid = 0;
+        for (int i = 0;i < Ndata;i++) *resid += pow_2(resids->data[i]);
+        *resid /= Ndata;
+    }
+#ifdef HAVE_EIGEN
+    gsl_multifit_fdfsolver_free(solver);
+    
     gsl_multifit_fdfsolver_free(solver);
 #endif
     if(!params.error.empty())
