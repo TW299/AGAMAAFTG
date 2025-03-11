@@ -1,4 +1,6 @@
 #include "actions_newtorus.h"
+#include <omp.h>
+
 //#define TESTIT
 
 /// accuracy parameter determining the spacing of the interpolation grid along the energy axis
@@ -7,6 +9,7 @@ static const double ACCURACY_INTERP2 = 1e-6;
 namespace actions {
 
 	namespace {//internal
+		double NANfrac, NANbar;
 
 		struct PVUVSph {
 			double u, v, phi, pu, pv, pphi;
@@ -14,16 +17,6 @@ namespace actions {
 		struct DerivActUVSph {
 			PVUVSph dbyJr, dbyJz, dbyJphi;
 		};
-		double** dmatrix(int n1, int n2) {
-			double** f = new double* [n1];
-			for (int i = 0;i < n1;i++)
-				f[i] = new double[n2];
-			return f;
-		}
-		void delmatrix(double** f, int n1) {
-			for (int i = 0;i < n1;i++) delete[] f[i];
-			delete[] f;
-		}
 		//Two functions used in containsPoint
 		double angleDiff(Angles A1, Angles A2) {
 
@@ -370,17 +363,38 @@ namespace actions {
 				dXdJ.dbyJphi.R * dHby.R + dXdJ.dbyJphi.z * dHby.z + dXdJ.dbyJphi.phi * dHby.phi +
 				dXdJ.dbyJphi.pR * dHby.pR + dXdJ.dbyJphi.pz * dHby.pz + dXdJ.dbyJphi.pphi * dHby.pphi);
 		}
-		//class to help with SoS computation
+		//class to help with zSoS computation
 		class CrossingFinder : public math::IFunction {
 		private:
 			const Torus* T;
-			const double thetaT_r;
+			const double thetaT_r, z0;
 		public:
-			CrossingFinder(const Torus* _T, const double& _thetaT) : T(_T), thetaT_r(_thetaT) {}
+			CrossingFinder(const Torus* _T, const double& _thetaT, const double _z0 = 0) :
+				T(_T), thetaT_r(_thetaT), z0(_z0) {
+			}
 			virtual void evalDeriv(const double thetaT_z, double* value, double* deriv = NULL, double* deriv2 = NULL) const {
 				Angles thetaT(thetaT_r, thetaT_z, 0);
 				coord::PosMomCyl Rz(T->from_toy(thetaT));
-				*value = Rz.z;
+				*value = Rz.z - z0;
+			}
+			virtual unsigned int numDerivs(void) const {
+				return 0;
+			}
+		};
+		//class to help with RSoS computation
+		class r_crossingFinder : public math::IFunction {
+		private:
+			const Torus* T;
+			const double rbar;
+			const double thetaT_z;
+		public:
+			r_crossingFinder(const Torus* _T, const double _rbar, const double& _thetaT) :
+				T(_T), rbar(_rbar), thetaT_z(_thetaT) {
+			}
+			virtual void evalDeriv(const double thetaT_r, double* value, double* deriv = NULL, double* deriv2 = NULL) const {
+				Angles thetaT(thetaT_r, thetaT_z, 0);
+				coord::PosMomSph rtheta(coord::toPosMomSph(T->from_toy(thetaT)));
+				*value = rtheta.r - rbar;
 			}
 			virtual unsigned int numDerivs(void) const {
 				return 0;
@@ -393,27 +407,114 @@ namespace actions {
 		 */
 		void assemble(DerivAng<coord::Cyl>& dA, math::Matrix<double>& M) {
 			std::vector<double> dxdthetaT = { dA.dbythetar.R,
-			dA.dbythetaz.R,dA.dbythetaphi.R,dA.dbythetar.z,
-			dA.dbythetaz.z,dA.dbythetaphi.z,dA.dbythetar.phi,
-			dA.dbythetaz.phi,dA.dbythetaphi.phi };
-			math::Matrix<double> dxdthetaT2(3, 3);
-			for (int k = 0;k < 3;k++) {
+			dA.dbythetaz.R, dA.dbythetaphi.R, dA.dbythetar.z,
+			dA.dbythetaz.z, dA.dbythetaphi.z, dA.dbythetar.phi,
+			dA.dbythetaz.phi, dA.dbythetaphi.phi };
+			std::vector<double> dpxdthetaT = { dA.dbythetar.pR,
+			dA.dbythetaz.pR, dA.dbythetaphi.pR, dA.dbythetar.pz,
+			dA.dbythetaz.pz, dA.dbythetaphi.pz, dA.dbythetar.pphi,
+			dA.dbythetaz.phi, dA.dbythetaphi.phi };
+			math::Matrix<double> dxdthetaT2(3, 3), dpxdthetaT2(3, 3);
+			for (int k = 0; k < 3; k++) {
 				for (int n = 0;n < 3;n++) {
 					dxdthetaT2(k, n) = dxdthetaT[3 * k + n];
+					dpxdthetaT2(k, n) = dpxdthetaT[3 * k + n];
 				}
 			}
 			math::LUDecomp L2(M);
 			math::Matrix<double> M2 = (L2.inverse(3));
 			math::Matrix<double> Mat3(3, 3);
 			math::CBLAS_TRANSPOSE Transp = math::CblasNoTrans;
-			math::blas_dgemm(math::CblasNoTrans, math::CblasNoTrans, 1.0, dxdthetaT2, M2, 0.0, Mat3);
+			math::blas_dgemm(math::CblasNoTrans, math::CblasNoTrans, 1.0,
+				dxdthetaT2, M2, 0.0, Mat3);
 			//DerivAng<coord::Cyl> deriv1;
+			dA.dbythetar.R = Mat3.at(0, 0);
+			dA.dbythetaz.R = Mat3.at(0, 1);
+			dA.dbythetaphi.R = Mat3.at(0, 2);
+			dA.dbythetar.z = Mat3.at(1, 0);
+			dA.dbythetaz.z = Mat3.at(1, 1);
+			dA.dbythetaphi.z = Mat3.at(1, 2);
+			dA.dbythetar.phi = Mat3.at(2, 0);
+			dA.dbythetaz.phi = Mat3.at(2, 1);
+			dA.dbythetaphi.phi = Mat3.at(2, 2);
 
-			dA.dbythetar.R = Mat3.at(0, 0);dA.dbythetaz.R = Mat3.at(0, 1);dA.dbythetaphi.R = Mat3.at(0, 2);
-			dA.dbythetar.z = Mat3.at(1, 0);dA.dbythetaz.z = Mat3.at(1, 1);dA.dbythetaphi.z = Mat3.at(1, 2);
-			dA.dbythetar.phi = Mat3.at(2, 0);dA.dbythetaz.phi = Mat3.at(2, 1);dA.dbythetaphi.phi = Mat3.at(2, 2);
-			//printf("dA %f %f\n",dA.dbythetar.R,dA.dbythetar.z);
+			math::blas_dgemm(math::CblasNoTrans, math::CblasNoTrans, 1.0,
+				dpxdthetaT2, M2, 0.0, Mat3);
+			//DerivAng<coord::Cyl> deriv1;
+			dA.dbythetar.pR = Mat3.at(0, 0);
+			dA.dbythetaz.pR = Mat3.at(0, 1);
+			dA.dbythetaphi.pR = Mat3.at(0, 2);
+			dA.dbythetar.pz = Mat3.at(1, 0);
+			dA.dbythetaz.pz = Mat3.at(1, 1);
+			dA.dbythetaphi.pz = Mat3.at(1, 2);
+			dA.dbythetar.pphi = Mat3.at(2, 0);
+			dA.dbythetaz.pphi = Mat3.at(2, 1);
+			dA.dbythetaphi.pphi = Mat3.at(2, 2);
 		}
+		/* Class to do Marquardt-Levenberg minimisaion
+		 * */
+		class Marquardt {
+		private:
+			math::IFunctionNdimDeriv& F;
+			const int nPts, nParams;
+			std::vector<double> dvarX;
+			math::Matrix<double> d2varX;
+			double var, ovar;
+			double varX(std::vector<double>& params) {
+				std::vector<double> Xs(nPts), dXs(nPts * nParams);
+				F.evalDeriv(&params[0], &Xs[0], &dXs[0]);
+				double var = 0;
+				for (int j = 0; j < nParams; j++) {//zero vector & matrix
+					dvarX[j] = 0;
+					for (int k = 0; k <= j; k++)
+						d2varX(j, k) = 0;
+				}
+				for (int i = 0; i < nPts; i++) {//accumulate variance, vector & matrix
+					var += pow_2(Xs[i]);
+					for (int j = 0; j < nParams; j++) {
+						dvarX[j] += Xs[i] * dXs[i * nParams + j];
+						for (int k = 0; k <= j; k++)//exploit symmetry
+							d2varX(j, k) += dXs[i * nParams + j] * dXs[i * nParams + k];
+					}
+				}
+				for (int j = 0; j < nParams; j++)
+					for (int k = j + 1; k < nParams; k++)
+						d2varX(j, k) = d2varX(k, j);
+				return 0.5 * var;
+			}
+		public:
+			Marquardt(math::IFunctionNdimDeriv& _F, std::vector<double>& params) :
+				F(_F), nPts(F.numValues()), nParams(F.numVars()),
+				dvarX(nParams), d2varX(nParams, nParams) {
+				ovar = varX(params);
+			}
+			double iterate(std::vector<double>& params, const double& _lam) {
+				double lam = _lam;
+				int kount = 0;
+				printf("ovar %g\n", ovar);
+				while (kount < 4) {
+					for (int j = 0; j < nParams; j++) d2varX(j, j) *= 1 + lam;
+					math::CholeskyDecomp CDcmp(d2varX);
+					std::vector<double> dp = CDcmp.solve(dvarX);
+					std::vector<double> ptry(nParams);
+					for (int j = 0; j < nParams; j++) ptry[j] = params[j] - dp[j];
+					var = varX(ptry);
+					for (int j = 0; j < nParams; j++) d2varX(j, j) /= 1 + lam;
+					if (var > ovar || std::isnan(var)) {
+						lam *= 10;
+						var = ovar;
+					}
+					else {
+						lam *= .1;
+						ovar = var;
+						for (int j = 0; j < nParams; j++) params[j] = ptry[j];
+					}
+					printf("%d %g %g\n", kount, var, lam); kount++;
+				}
+				return var;
+			}
+		};
+
 		/* A helper class used by TorusGenerator. It evaluates H and its
 		 * derivatives on a toy-angle grid over a proposed torus using a
 		 * proposed GF. Once the GF has been
@@ -426,61 +527,56 @@ namespace actions {
 			const potential::BasePotential& pot;
 			const Isochrone& Is;
 			const coord::UVSph& cs;
-			GenFncFit& GFF;
-			double NANfrac;
+			GenFncFitSeries& GFFS;
 		public:
 			torusFitter(const Actions& _J,
 				const potential::BasePotential& _pot,
 				const Isochrone& _Is, const coord::UVSph& _cs,
-				GenFncFit& _GFF) :
-				J(_J), pot(_pot), Is(_Is), cs(_cs), GFF(_GFF) {
+				GenFncFitSeries& _GFFS) :
+				J(_J), pot(_pot), Is(_Is), cs(_cs), GFFS(_GFFS) {
 			}
 			virtual unsigned int numVars() const {
-				return GFF.numParams();
+				return GFFS.numParams();
 			}
 			virtual unsigned int numValues() const {
-				return GFF.numPoints();
+				return GFFS.numPoints();
 			}
 			double computeHamiltonianAtPoint(const double params[],
-				const unsigned int indPoint, Actions* dHdJ = NULL,
-				double* derivGenFnc = NULL) const
+				const unsigned int indPoint, Actions& JT, Actions* dHdJ = NULL,
+				double* dHdParams = NULL) const
 			{
 				// Generating function computes the toy actions from the real actions
 				// at the given point in the grid of toy angles grid
-				ActionAngles toyAA = GFF.toyActionAngles(indPoint, params);
+				ActionAngles toyAA = GFFS.toyActionAngles(indPoint, params);
 
 				// do not allow to stray into forbidden region of negative actions
+					//assert((toyAA.Jr >= 0) && (toyAA.Jz >= 0),"negative action in computeHamiltonianAtPoint");
 				if (toyAA.Jr < 0 || toyAA.Jz < 0) {
-					printf("J<0: %f %f ", toyAA.Jr, toyAA.Jz);
-					return NAN;
+					JT.Jr = toyAA.Jr; JT.Jz = toyAA.Jz;
+					return 0;
 				}
 				// aa2pq computes the position and velocity from the toy actions and angles,
 				// and optionally their derivatives w.r.t. toy actions and toy map parameters,
 				DerivAct<coord::Sph> derivAct;//derivs of coords wrt Js
-				coord::PosMomSph rtheta = Is.aa2pq(toyAA, NULL, derivGenFnc != NULL ? &derivAct : NULL);
+				coord::PosMomSph rtheta = Is.aa2pq(toyAA, NULL, dHdParams != NULL ? &derivAct : NULL);
 				actions::DerivAct<coord::Cyl> dXdJ;
 				coord::PosMomCyl Rzphi = PosMomDerivs(rtheta, cs,
-					derivGenFnc != NULL ? &derivAct : NULL, dXdJ);
+					dHdParams != NULL ? &derivAct : NULL, dXdJ);
 				// obtain the value of the real Hamiltonian at the given point and its
 				// derivatives w.r.t. coordinates/momenta
 				coord::PosMomCyl dHdX;
 				double H = H_dHdX(pot, Rzphi, dHdX);
 
 				// derivatives of Hamiltonian w.r.t. parameters of gen.fnc.
-				if (derivGenFnc) {
+				if (dHdParams) {
 					Actions dHby = dHbydJ(dHdX, dXdJ);// derivative of Hamiltonian by toy actions
-					if (indPoint == -30 || indPoint == -10) {
-						printf("(H %f dHby %f %f\n", H, dHby.Jr, dHby.Jz);
-						printf("dXdJ %f %f %f %f %f %f %f %f\n", dXdJ.dbyJr.R, dXdJ.dbyJr.z, dXdJ.dbyJz.R, dXdJ.dbyJz.z, dXdJ.dbyJr.pR, dXdJ.dbyJr.pz, dXdJ.dbyJz.pR, dXdJ.dbyJz.pz);
-						printf("[dHdX %f %f %f %f %f %f\n] ", dHdX.R, dHdX.z, dHdX.phi, dHdX.pR, dHdX.pz, dHdX.pphi);
-					}
 					if (dHdJ) *dHdJ = dHby;
-					for (unsigned int p = 0; p < GFF.numParams(); p++) {
+					for (unsigned int p = 0; p < GFFS.numParams(); p++) {
 						// derivs of toy actions by gen.fnc.params
-						Actions dbyS = GFF.deriv(indPoint, p);
+						Actions dbyS = GFFS.deriv(indPoint, p, &params[0]);
 						// derivs of Hamiltonian by gen.fnc.params
 						double  dHdS = dHby.Jr * dbyS.Jr + dHby.Jz * dbyS.Jz + dHby.Jphi * dbyS.Jphi;
-						derivGenFnc[p] = dHdS;
+						dHdParams[p] = dHdS;
 						if (std::isnan(dHdS)) {
 							printf("AtPoint  %f %f %f %f %f %f\n", dHby.Jr, dHby.Jz, dHby.Jphi, dbyS.Jr, dbyS.Jz, dbyS.Jphi);
 							printf("%f %f %f %f %f %f\n", dXdJ.dbyJr.R, dXdJ.dbyJr.z, dXdJ.dbyJr.phi,
@@ -498,52 +594,73 @@ namespace actions {
 
 			double computeHamiltonianDisp(const std::vector<double>& params, double& Hbar)
 			{
-				const unsigned int numParams = GFF.numParams();
-				math::Averager Havg;
-				int Nnan = 0;
-				for (unsigned int indPoint = 0; indPoint < GFF.numPoints(); indPoint++) {
-					double H = computeHamiltonianAtPoint(&params[0], indPoint);
-					Havg.add(H); if (std::isnan(H)) Nnan++;
+				const unsigned int numParams = GFFS.numParams(), max_threads = 1;
+				double Hsm[max_threads] = { 0 }, Hsq[max_threads] = { 0 };
+				int N[max_threads] = { 0 };
+				int Nnan[max_threads] = { 0 };
+//#pragma omp parallel for schedule(dynamic)
+				for (int indPoint = 0; indPoint < GFFS.numPoints(); indPoint++) {
+					//int nth = omp_get_thread_num();
+					int nth = 0;
+					Actions JT(1, 1, 1);
+					double H = computeHamiltonianAtPoint(&params[0], indPoint, JT);
+					if (JT.Jr < 0 || JT.Jz < 0) Nnan[nth]++;
+					else {
+						Hsm[nth] += H; Hsq[nth] += H * H; N[nth]++;
+					}
 				}
-				Hbar = Havg.mean();
-				NANfrac = (double)Nnan / (double)GFF.numPoints();
-				return Havg.disp();
-			}
-			double giveNANfrac() const {
-				return NANfrac;
+				for (int i = 1; i < max_threads; i++) {//concatenate sums
+					Nnan[0] += Nnan[i]; Hsm[0] += Hsm[i]; Hsq[0] += Hsq[i]; N[0] += N[i];
+				}
+				Hbar = Hsm[0] / N[0];
+				Hsq[0] = Hsq[0] / N[0] - Hbar * Hbar;
+				NANfrac = (double)Nnan[0] / (double)GFFS.numPoints();
+				NANbar += NANfrac;
+				return sqrt(Hsq[0]);
 			}
 			void evalDeriv(const double params[],
 				double* deltaHvalues, double* dHdParams) const
 			{
-				const unsigned int numPoints = GFF.numPoints();
-				const unsigned int numParams = GFF.numParams();
+				const unsigned int numPoints = GFFS.numPoints();
+				const unsigned int numParams = GFFS.numParams();
+				const unsigned int max_threads = 1;
 
 				// we need to store the values of Hamiltonian at grid points even if this is not requested,
 				// because they are used to correct the entries of the Jacobian matrix
 				// to account for the fact that the mean <H> also depends on the parameters
 				std::vector<double> Hvalues(numPoints);
-				double Havg = 0;  // accumulator for the average Hamiltonian
+				double Havg[max_threads] = { 0 };  // accumulator for the average Hamiltonian
+				int nNAN[max_threads] = { 0 };
 				// loop over grid of toy angles
-				for (unsigned int indPoint = 0; indPoint < numPoints; indPoint++) {
-					double H = computeHamiltonianAtPoint(params, indPoint, NULL,
+//#pragma omp parallel for schedule(dynamic)
+				for (int indPoint = 0; indPoint < numPoints; indPoint++) {
+					int nth = 0;
+						//omp_get_thread_num();
+					Actions JT(1, 1, 1);
+					double H = computeHamiltonianAtPoint(params, indPoint, JT, NULL,
 						dHdParams ? dHdParams + indPoint * numParams : NULL);
-					if (std::isnan(H)) {
-						Havg += 1;
-						Hvalues[indPoint] = 1;
+					if (JT.Jr < 0 || JT.Jz < 0) {
+						nNAN[nth]++;
+						Havg[nth] += 1e6;
+						Hvalues[indPoint] = 1e6; break;
 					}
 					else {
 						// accumulate the average value and store the output
-						Havg += H;
+						Havg[nth] += H;
 						Hvalues[indPoint] = H;
 					}
 				}
+				for (int i = 1; i < max_threads; i++) {
+					nNAN[0] += nNAN[i]; Havg[0] += Havg[i];
+				}
 
 				// convert from  H_k  to  deltaH_k = H_k - <H>
-				Havg /= numPoints;
+				NANfrac = (double)nNAN[0] / numPoints; Havg[0] /= numPoints;//we can't put nNAN in NANfrac!
+				NANbar += NANfrac;
 				if (deltaHvalues) {
 					double disp = 0;
 					for (unsigned int indPoint = 0; indPoint < numPoints; indPoint++) {
-						deltaHvalues[indPoint] = Hvalues[indPoint] - Havg;
+						deltaHvalues[indPoint] = Hvalues[indPoint] - Havg[0];
 						disp += pow_2(deltaHvalues[indPoint]);
 					}
 				}
@@ -565,6 +682,27 @@ namespace actions {
 					}
 				}
 			}
+			void testit(std::vector<double> params, int N) {
+				int nPts = GFFS.numPoints(), nPars = GFFS.numParams();
+				double varH;
+				double* HmHbar = new double[nPts];
+				double* HmX = new double[nPts];
+				double* dHdP = new double[nPts * nPars];
+				double dA = 1e-5;
+				//explore changing Nth parameter 
+				params[N] += .5 * dA;
+				evalDeriv(&params[0], HmHbar, NULL);
+				params[N] -= dA;
+				evalDeriv(&params[0], HmX, NULL);
+				for (int i = 0;i < nPts;i++)
+					HmX[i] = (HmHbar[i] - HmX[i]) / dA;
+				params[N] += .5 * dA;
+				evalDeriv(&params[0], HmHbar, dHdP);
+				for (int i = 0; i < nPts; i += 10)
+					printf("(%g %g) ", HmX[i], dHdP[i * nPars + N]);
+				printf("\n");
+				delete[] HmHbar; delete[] HmX; delete[] dHdP;
+			}
 			/** Compute the frequencies and the derivatives of generating function by real actions,
 				used in angle mapping.
 				The three arrays of derivatives dS_i/dJ_{r,z,phi}, i=0..numParamsGenFnc-1,
@@ -584,14 +722,13 @@ namespace actions {
 				The return value of this function is the same as `computeHamiltonianDisp()`.
 			*/
 			double fitAngleMap(const double params[],
-				double& Hbar, Frequencies& freqs, GenFncDerivs& derivs) const
-			{
-				unsigned int numPoints = GFF.numPoints();
-				unsigned int numParams = GFF.numParams();
+				double& Hbar, Frequencies& freqs, GenFncDerivs& dPdJ) const {
+				unsigned int numPoints = GFFS.numPoints();
+				unsigned int numParams = GFFS.numParams();
 				// the matrix of coefficients shared between three linear systems
 				math::Matrix<double> coefsdHdS(numPoints, numParams + 1);
 				// tmp storage for dH/dS
-				std::vector<double> derivGenFnc(numParams + 1);
+				std::vector<double> dHdParams(numParams + 1);
 				// derivs of Hamiltonian by toy actions (RHS vectors)
 				std::vector<double> dHdJr(numPoints), dHdJz(numPoints), dHdJphi(numPoints);
 				// accumulator for computing dispersion in H
@@ -599,19 +736,19 @@ namespace actions {
 
 				// loop over grid of toy angles
 				for (unsigned int indPoint = 0; indPoint < numPoints; indPoint++) {
-					Actions dHby;  // derivative of Hamiltonian by toy actions
-					double H = computeHamiltonianAtPoint(&params[0], indPoint,
-						&dHby, &derivGenFnc.front());
-					if (!std::isnan(H)) Havg.add(H);
-					else printf("nan @ %d ", indPoint);
+					Actions JT(1, 1, 1), dHby;  // derivative of Hamiltonian by toy actions
+					double H = computeHamiltonianAtPoint(&params[0], indPoint, JT,
+						&dHby, &dHdParams.front());
+					if (!(JT.Jr < 0 || JT.Jz < 0)) Havg.add(H);
+					else printf("J<0 @ %d ", indPoint);
 					// fill the elements of each of three rhs vectors
 					dHdJr[indPoint] = dHby.Jr;
 					dHdJz[indPoint] = dHby.Jz;
 					dHdJphi[indPoint] = dHby.Jphi;
 					// fill the matrix row
 					coefsdHdS(indPoint, 0) = 1;  // matrix coef for omega
-					for (unsigned int p = 0; p < numParams; p++)
-						coefsdHdS(indPoint, p + 1) = -derivGenFnc[p];  // matrix coef for dS_p/dJ
+					for (unsigned int p = 0; p < numParams; p++) // matrix coefs for dSk/dJ
+						coefsdHdS(indPoint, p + 1) = -dHdParams[p];
 				}
 				Hbar = Havg.mean();
 				// solve the overdetermined linear system in the least-square sense:
@@ -626,13 +763,13 @@ namespace actions {
 				freqs.Omegar = dSdJr[0];
 				freqs.Omegaz = dSdJz[0];
 				freqs.Omegaphi = dSdJphi[0];
-				derivs.resize(numParams);
+				dPdJ.resize(numParams);
 				for (unsigned int p = 0; p < numParams; p++) {
-					derivs[p].Jr = dSdJr[p + 1];
-					derivs[p].Jz = dSdJz[p + 1];
-					derivs[p].Jphi = dSdJphi[p + 1];
+					dPdJ[p].Jr = dSdJr[p + 1];
+					dPdJ[p].Jz = dSdJz[p + 1];
+					dPdJ[p].Jphi = dSdJphi[p + 1];
 				}
-				return Havg.disp();
+				return sqrt(Havg.disp());
 			}
 
 		};
@@ -679,14 +816,26 @@ namespace actions {
 	}
 
 	//interpolate between 2 tori
-	EXP Torus interpT(const double x, Torus T0, Torus T1) {
+	EXP Torus interpTorus(const double x, const Torus& T0, const Torus& T1) {
 		if (x == 1) return T0;
 		if (x == 0) return T1;
-		Torus T2(T0 * x);
-		T2 += T1 * (1 - x);
-		return T2;
+		const double xp = 1 - x;
+		Actions J = T0.J * x + T1.J * xp;
+		Frequencies freqs = T0.freqs * x + T1.freqs * xp;
+		GenFnc GF(interpGenFnc(x, T0.GF, T1.GF));
+		Isochrone Is = T0.Is * x + T1.Is * xp;
+		coord::UVSph cs(T0.cs.Delta * x + T1.cs.Delta * xp);
+		double E = T0.E * x + T1.E * xp;
+		return Torus(J, freqs, GF, Is, cs, E);
 	}
-	EXP Torus InterpTorus(std::vector<Torus>& Tgrid, std::vector<double>& xs, double x) {
+	/*	EXP Torus interpT(const double x, Torus T0, Torus T1) {
+			if (x == 1) return T0;
+			if (x == 0) return T1;
+			Torus T2(T0 * x);
+			T2 += T1 * (1 - x);
+			return T2;
+		}*/
+	EXP Torus interpTorus(const double x, std::vector<double>& xs, std::vector<Torus>& Tgrid) {
 		int top, bot;
 		if (xs[0] > xs[xs.size() - 1]) {
 			top = 0; bot = xs.size() - 1;
@@ -711,16 +860,21 @@ namespace actions {
 			}
 			f = (xs[top] - x) / (xs[top] - xs[bot]);//distance from top
 		}
-		return interpT(f, Tgrid[bot], Tgrid[top]);
+		return interpTorus(f, Tgrid[bot], Tgrid[top]);
 	}
-	EXP eTorus interpT(const double x, const eTorus T0, const eTorus T1) {
-		if (x == 1) return T0;
-		if (x == 0) return T1;
-		eTorus T2(T0 * x);
-		T2 += T1 * (1 - x);
-		return T2;
+	EXP eTorus interpeTorus(const double x, const eTorus& eT0, const eTorus& eT1) {
+		if (x == 1) return eT0;
+		if (x == 0) return eT1;
+		const double xp = 1 - x;
+		PerturbingHamiltonian pH = eT0.pH * x + eT1.pH * xp;
+		Torus T0(eT0), T1(eT1);
+		return eTorus(interpTorus(x, T0, T1), pH);
+
+		/*		eTorus T2(T0 * x);
+				T2 += T1 * (1 - x);
+				return T2;*/
 	}
-	EXP eTorus InterpTorus(std::vector<eTorus>& Tgrid, std::vector<double>& xs, double x) {
+	EXP eTorus interpeTorus(const double x, std::vector<double>& xs, std::vector<eTorus>& Tgrid) {
 		int top, bot;
 		if (xs[0] > xs[xs.size() - 1]) {
 			top = 0; bot = xs.size() - 1;
@@ -745,7 +899,7 @@ namespace actions {
 			}
 			f = (xs[top] - x) / (xs[top] - xs[bot]);//distance from top
 		}
-		return interpT(f, Tgrid[bot], Tgrid[top]);
+		return interpeTorus(f, Tgrid[bot], Tgrid[top]);
 	}
 	PerturbingHamiltonian& PerturbingHamiltonian::operator *= (const double a) {
 		for (int i = 0; i < values.size(); i++)
@@ -789,12 +943,9 @@ namespace actions {
 		return H2;
 	}
 
-#ifdef TESTIT
-#include "actions_test_torus.cpp"
-#endif
-
 	coord::PosMomCyl Torus::from_toy(const Angles& thetaT) const {
 		ActionAngles aaT(GF.toyJ(J, thetaT), thetaT);
+		//		if(GF.indices.size()>1 && GF.indices.size()<13) printf("JT %f ",aaT.Jr);
 		return from_aaT(aaT);
 	}
 	coord::PosMomCyl Torus::from_aaT(const ActionAngles& aaT) const {//input toy J & theta
@@ -804,11 +955,9 @@ namespace actions {
 		ActionAngles aaT(GF.true2toy(ActionAngles(J, theta)));//toy AAs computed from true
 		return from_aaT(aaT);
 	}
-	//start fromT
 	coord::PosCyl Torus::PosDerivJ(const Angles& thetaT,
 		actions::DerivAct<coord::Cyl>& dRJ) const {
 		ActionAngles aaT(GF.toyJ(J, thetaT), thetaT);
-
 		actions::DerivAct<coord::Sph> dJ;
 		actions::DerivAng<coord::Sph> dA;
 		const coord::PosMomSph rtheta(Is.aa2pq(aaT, NULL, &dJ, &dA));
@@ -816,7 +965,7 @@ namespace actions {
 		math::sincos(rtheta.theta, snv, csv);
 		coord::PosUVSph uv(asinh(rtheta.r / cs.Delta), rtheta.theta, rtheta.phi, cs);
 		double chu = cosh(uv.u), shu = sinh(uv.u);
-		double dudr = 1.0 / (cs.Delta * chu);
+		double dudr = 1 / (cs.Delta * chu);
 		double dRdu = cs.Delta * chu * snv, dRdv = cs.Delta * shu * csv;
 		double dzdu = cs.Delta * shu * csv, dzdv = -cs.Delta * chu * snv;
 		double n1 = (-cos(2 * uv.v) + cosh(2 * uv.u));
@@ -860,73 +1009,56 @@ namespace actions {
 		GF.dtbydtT_Jacobian(thetaT, dthetadthetaT);
 
 		math::Matrix<double> dxdJT(3, 3);
-		dxdJT(0, 0) = dRJ.dbyJr.R;dxdJT(1, 0) = dRJ.dbyJr.z;dxdJT(2, 0) = dRJ.dbyJr.phi;
-		dxdJT(0, 1) = dRJ.dbyJz.R;dxdJT(1, 1) = dRJ.dbyJz.z;dxdJT(2, 1) = dRJ.dbyJz.phi;
-		dxdJT(0, 2) = dRJ.dbyJphi.R;dxdJT(1, 2) = dRJ.dbyJphi.z;dxdJT(2, 2) = dRJ.dbyJphi.phi;
+		dxdJT(0, 0) = dRJ.dbyJr.R; dxdJT(1, 0) = dRJ.dbyJr.z; dxdJT(2, 0) = dRJ.dbyJr.phi;
+		dxdJT(0, 1) = dRJ.dbyJz.R; dxdJT(1, 1) = dRJ.dbyJz.z; dxdJT(2, 1) = dRJ.dbyJz.phi;
+		dxdJT(0, 2) = dRJ.dbyJphi.R; dxdJT(1, 2) = dRJ.dbyJphi.z; dxdJT(2, 2) = dRJ.dbyJphi.phi;
 		//Gets dw/dJ=dw/dJT*dJt/dJ
 		math::Matrix<double> Mat3(3, 3);
 		math::blas_dgemm(math::CblasNoTrans, math::CblasTrans, 1.0, dxdJT, dthetadthetaT, 0.0, Mat3);
-		//math::blas_dgemm(math::CblasNoTrans, math::CblasNoTrans, 1.0, dxdJT, AB, 0.0, Mat3);
 		math::Matrix<double> dpdJT(3, 3);
-		dpdJT(0, 0) = dRJ.dbyJr.pR;dpdJT(1, 0) = dRJ.dbyJr.pz;dpdJT(2, 0) = dRJ.dbyJr.pphi;
-		dpdJT(0, 1) = dRJ.dbyJz.pR;dpdJT(1, 1) = dRJ.dbyJz.pz;dpdJT(2, 1) = dRJ.dbyJz.pphi;
-		dpdJT(0, 2) = dRJ.dbyJphi.pR;dpdJT(1, 2) = dRJ.dbyJphi.pz;dpdJT(2, 2) = dRJ.dbyJphi.pphi;
+		dpdJT(0, 0) = dRJ.dbyJr.pR; dpdJT(1, 0) = dRJ.dbyJr.pz; dpdJT(2, 0) = dRJ.dbyJr.pphi;
+		dpdJT(0, 1) = dRJ.dbyJz.pR; dpdJT(1, 1) = dRJ.dbyJz.pz; dpdJT(2, 1) = dRJ.dbyJz.pphi;
+		dpdJT(0, 2) = dRJ.dbyJphi.pR; dpdJT(1, 2) = dRJ.dbyJphi.pz; dpdJT(2, 2) = dRJ.dbyJphi.pphi;
 		math::Matrix<double> Mat4(3, 3);
 		math::blas_dgemm(math::CblasNoTrans, math::CblasTrans, 1.0, dpdJT, dthetadthetaT, 0.0, Mat4);
-		dRJ.dbyJr.R = Mat3(0, 0);dRJ.dbyJr.z = Mat3(1, 0);dRJ.dbyJr.phi = Mat3(2, 0);
-		dRJ.dbyJz.R = Mat3(0, 1);dRJ.dbyJz.z = Mat3(1, 1);dRJ.dbyJz.phi = Mat3(2, 1);
-		dRJ.dbyJphi.R = Mat3(0, 2);dRJ.dbyJphi.z = Mat3(1, 2);dRJ.dbyJphi.phi = Mat3(2, 2);
-		dRJ.dbyJr.pR = Mat4(0, 0);dRJ.dbyJr.pz = Mat4(1, 0);dRJ.dbyJr.pphi = Mat4(2, 0);
-		dRJ.dbyJz.pR = Mat4(0, 1);dRJ.dbyJz.pz = Mat4(1, 1);dRJ.dbyJz.pphi = Mat4(2, 1);
-		dRJ.dbyJphi.pR = Mat4(0, 2);dRJ.dbyJphi.pz = Mat4(1, 2);dRJ.dbyJphi.pphi = Mat4(2, 2);
-		
+		dRJ.dbyJr.R = Mat3(0, 0); dRJ.dbyJr.z = Mat3(1, 0); dRJ.dbyJr.phi = Mat3(2, 0);
+		dRJ.dbyJz.R = Mat3(0, 1); dRJ.dbyJz.z = Mat3(1, 1); dRJ.dbyJz.phi = Mat3(2, 1);
+		dRJ.dbyJphi.R = Mat3(0, 2); dRJ.dbyJphi.z = Mat3(1, 2); dRJ.dbyJphi.phi = Mat3(2, 2);
+		dRJ.dbyJr.pR = Mat4(0, 0); dRJ.dbyJr.pz = Mat4(1, 0); dRJ.dbyJr.pphi = Mat4(2, 0);
+		dRJ.dbyJz.pR = Mat4(0, 1); dRJ.dbyJz.pz = Mat4(1, 1); dRJ.dbyJz.pphi = Mat4(2, 1);
+		dRJ.dbyJphi.pR = Mat4(0, 2); dRJ.dbyJphi.pz = Mat4(1, 2); dRJ.dbyJphi.pphi = Mat4(2, 2);
 		return coord::toPosCyl(uv);
 	}
-	//end fromT
-		/* Position from toy angle plus dR/dthetaT and dpR/dthetaT at fixed J (which causes JT
-		 * to vary with thetaT)
-		*/
+	/* Position from toy angle plus dR/dthetaT and dpR/dthetaT at fixed J (which causes JT
+	 * to vary with thetaT)
+	*/
 	coord::PosCyl Torus::PosDerivs(const Angles& thetaT,
-		actions::DerivAngCyl& dRA, double* det) const {
+		DerivAngCyl& dRA, double* det) const {
 		ActionAngles aaT(GF.toyJ(J, thetaT), thetaT);
-		actions::DerivAct<coord::Sph> dJ;
-		actions::DerivAng<coord::Sph> dA;
+		DerivAct<coord::Sph> dJ;
+		DerivAng<coord::Sph> dA;
 		const coord::PosMomSph rtheta(Is.aa2pq(aaT, NULL, &dJ, &dA));
 		double snv, csv;
 		math::sincos(rtheta.theta, snv, csv);
 		coord::PosUVSph uv(asinh(rtheta.r / cs.Delta), rtheta.theta, rtheta.phi, cs);
 		double chu = cosh(uv.u), shu = sinh(uv.u);
-		double chu2 = 2 * chu * chu - 1, shu2 = 2 * shu * chu;
-		double csv2 = 2 * csv*csv - 1, sinv2 = 2 * snv * csv;
 		double dudr = 1 / (cs.Delta * chu);
 		double dRdu = cs.Delta * chu * snv, dRdv = cs.Delta * shu * csv;
 		double dzdu = cs.Delta * shu * csv, dzdv = -cs.Delta * chu * snv;
-		//start fromT
-		double n1 = (chu2-csv2);
-		double dpRdv = (2 * csv * pow_2(chu) * (-2 + csv2 + chu2)) / pow_2(n1) * rtheta.pr
-			- 2 * (2 + csv2 + chu2) * snv * shu / (cs.Delta * pow_2(n1)) * rtheta.ptheta;
-		double dpzdv = -(2 + csv2 + chu2) * snv * shu2 / pow_2(n1) * rtheta.pr
-			- 2 * csv * chu * (-2 + csv2 + chu2) / (cs.Delta * pow_2(n1)) * rtheta.ptheta;
-		double dpRdu = -4 * pow_2(csv) * snv * shu2 / pow_2(n1) * rtheta.pr - 2 * csv * chu * 
-			(-2 + csv2+ chu2) / (cs.Delta * pow_2(n1)) * rtheta.ptheta;
-		double dpzdu = -2 * csv * (csv2 * chu2 - 1) / pow_2(n1) * rtheta.pr
-			+ 2 * (2 + csv2 + chu2) * snv * shu / (cs.Delta * pow_2(n1)) * rtheta.ptheta;
+
+		double n1 = (-cos(2 * uv.v) + cosh(2 * uv.u));
+		double dpRdv = (2 * csv * pow_2(chu) * (-2 + cos(2 * uv.v) + cosh(2 * uv.u))) / pow_2(n1) * rtheta.pr
+			- 2 * (2 + cos(2 * uv.v) + cosh(2 * uv.u)) * sin(uv.v) * sinh(uv.u) / (cs.Delta * pow_2(n1)) * rtheta.ptheta;
+		double dpzdv = -(2 + cos(2 * uv.v) + cosh(2 * uv.u)) * sin(uv.v) * sinh(2 * uv.u) / pow_2(n1) * rtheta.pr
+			- 2 * cos(uv.v) * cosh(uv.u) * (-2 + cos(2 * uv.v) + cosh(2 * uv.u)) / (cs.Delta * pow_2(n1)) * rtheta.ptheta;
+		double dpRdu = -4 * pow_2(csv) * snv * sinh(2 * uv.u) / pow_2(n1) * rtheta.pr - 2 * csv * chu * (-2 + cos(2 * uv.v)
+			+ cosh(2 * uv.u)) / (cs.Delta * pow_2(n1)) * rtheta.ptheta;
+		double dpzdu = -2 * csv * (cos(2 * uv.v) * cosh(2 * uv.u) - 1) / pow_2(n1) * rtheta.pr
+			+ 2 * (2 + cos(2 * uv.v) + cosh(2 * uv.u)) * snv * shu / (cs.Delta * pow_2(n1)) * rtheta.ptheta;
 		double dpRdpr = 2 * pow_2(chu) * snv / n1;
-		double dpRdpt = 2 * shu* csv / (cs.Delta * n1);
+		double dpRdpt = 2 * sinh(uv.u) * cos(uv.v) / (cs.Delta * n1);
 		double dpzdpr = 2 * csv * chu * shu / n1;double dpzdpt = -2 * chu * snv / (cs.Delta * n1);
-		dRA.dbythetar.pR = dpRdpr * dA.dbythetar.pr + dpRdpt * dA.dbythetar.ptheta + dpRdu * dudr * dA.dbythetar.r
-			+ dpRdv * dA.dbythetar.theta;
-		dRA.dbythetaz.pR = dpRdpr * dA.dbythetaz.pr + dpRdpt * dA.dbythetaz.ptheta + dpRdu * dudr * dA.dbythetaz.r
-			+ dpRdv * dA.dbythetaz.theta;
-		dRA.dbythetaphi.pR = dpRdpr * dA.dbythetaphi.pr + dpRdpt * dA.dbythetaphi.ptheta + dpRdu * dudr * dA.dbythetaphi.r
-			+ dpRdv * dA.dbythetaphi.theta;
-		dRA.dbythetar.pz = dpzdpr * dA.dbythetar.pr + dpzdpt * dA.dbythetar.ptheta + dpzdu * dudr * dA.dbythetar.r
-			+ dpzdv * dA.dbythetar.theta;
-		dRA.dbythetaz.pz = dpzdpr * dA.dbythetaz.pr + dpzdpt * dA.dbythetaz.ptheta + dpzdu * dudr * dA.dbythetaz.r
-			+ dpzdv * dA.dbythetaz.theta;
-		dRA.dbythetaphi.pz = dpzdpr * dA.dbythetaphi.pr + dpzdpt * dA.dbythetaphi.ptheta + dpzdu * dudr * dA.dbythetaphi.r
-			+ dpzdv * dA.dbythetaphi.theta;
-		//end fromT
+
 		dRA.dbythetar.R = dRdu * dudr * dA.dbythetar.r + dRdv * dA.dbythetar.theta;
 		dRA.dbythetaz.R = dRdu * dudr * dA.dbythetaz.r + dRdv * dA.dbythetaz.theta;
 		dRA.dbythetaphi.R = dRdu * dudr * dA.dbythetaphi.r + dRdv * dA.dbythetaphi.theta;
@@ -936,8 +1068,20 @@ namespace actions {
 		dRA.dbythetar.phi = dA.dbythetar.phi;
 		dRA.dbythetaz.phi = dA.dbythetaz.phi;
 		dRA.dbythetaphi.phi = 1;
+		dRA.dbythetar.pR = dpRdpr * dA.dbythetar.pr + dpRdpt * dA.dbythetar.ptheta
+			+ dpRdu * dudr * dA.dbythetar.r + dpRdv * dA.dbythetar.theta;
+		dRA.dbythetaz.pR = dpRdpr * dA.dbythetaz.pr + dpRdpt * dA.dbythetaz.ptheta
+			+ dpRdu * dudr * dA.dbythetaz.r + dpRdv * dA.dbythetaz.theta;
+		dRA.dbythetaphi.pR = dpRdpr * dA.dbythetaphi.pr + dpRdpt * dA.dbythetaphi.ptheta
+			+ dpRdu * dudr * dA.dbythetaphi.r + dpRdv * dA.dbythetaphi.theta;
+		dRA.dbythetar.pz = dpzdpr * dA.dbythetar.pr + dpzdpt * dA.dbythetar.ptheta
+			+ dpzdu * dudr * dA.dbythetar.r + dpzdv * dA.dbythetar.theta;
+		dRA.dbythetaz.pz = dpzdpr * dA.dbythetaz.pr + dpzdpt * dA.dbythetaz.ptheta
+			+ dpzdu * dudr * dA.dbythetaz.r + dpzdv * dA.dbythetaz.theta;
+		dRA.dbythetaphi.pz = dpzdpr * dA.dbythetaphi.pr + dpzdpt * dA.dbythetaphi.ptheta
+			+ dpzdu * dudr * dA.dbythetaphi.r + dpzdv * dA.dbythetaphi.theta;
 
-		actions::DerivAct<coord::Cyl> dRJ;
+		DerivAct<coord::Cyl> dRJ;
 		dRJ.dbyJr.R = dRdu * dudr * dJ.dbyJr.r + dRdv * dJ.dbyJr.theta;
 		dRJ.dbyJz.R = dRdu * dudr * dJ.dbyJz.r + dRdv * dJ.dbyJz.theta;
 		dRJ.dbyJphi.R = dRdu * dudr * dJ.dbyJphi.r + dRdv * dJ.dbyJphi.theta;
@@ -947,7 +1091,7 @@ namespace actions {
 		dRJ.dbyJr.phi = dJ.dbyJr.phi;
 		dRJ.dbyJz.phi = dJ.dbyJz.phi;
 		dRJ.dbyJphi.phi = dJ.dbyJphi.phi;
-		//start fromT
+
 		dRJ.dbyJr.pR = dpRdu * dudr * dJ.dbyJr.r + dpRdv * dJ.dbyJr.theta + dpRdpr * dJ.dbyJr.pr + dpRdpt * dJ.dbyJr.ptheta;
 		dRJ.dbyJz.pR = dpRdpr * dJ.dbyJz.pr + dpRdpt * dJ.dbyJz.ptheta + dpRdu * dudr * dJ.dbyJz.r
 			+ dpRdv * dJ.dbyJz.theta;
@@ -959,33 +1103,35 @@ namespace actions {
 			+ dpzdv * dJ.dbyJz.theta;
 		dRJ.dbyJphi.pz = dpzdpr * dJ.dbyJphi.pr + dpzdpt * dJ.dbyJphi.ptheta + dpzdu * dudr * dJ.dbyJphi.r
 			+ dpzdv * dJ.dbyJphi.theta;
-		//end fromT
-		actions::DerivAng<coord::Cyl> dJA = GF.dJdt(thetaT); //dJT/dthetaT
+
+		DerivAng<coord::Cyl> dJA = GF.dJdt(thetaT); //dJT/dthetaT
 		dRA.dbythetar.R += dRJ.dbyJr.R * dJA.dbythetar.R + dRJ.dbyJz.R * dJA.dbythetar.z;
 		dRA.dbythetaz.R += dRJ.dbyJr.R * dJA.dbythetaz.R + dRJ.dbyJz.R * dJA.dbythetaz.z;
 		dRA.dbythetar.z += dRJ.dbyJr.z * dJA.dbythetar.R + dRJ.dbyJz.z * dJA.dbythetar.z;
 		dRA.dbythetaz.z += dRJ.dbyJr.z * dJA.dbythetaz.R + dRJ.dbyJz.z * dJA.dbythetaz.z;
 		dRA.dbythetar.phi += dRJ.dbyJr.phi * dJA.dbythetar.R + dRJ.dbyJz.phi * dJA.dbythetar.z;
 		dRA.dbythetaz.phi += dRJ.dbyJr.phi * dJA.dbythetaz.R + dRJ.dbyJz.phi * dJA.dbythetaz.z;
-		//start fromT
+
 		dRA.dbythetar.pR += dRJ.dbyJr.pR * dJA.dbythetar.R + dRJ.dbyJz.pR * dJA.dbythetar.z;
 		dRA.dbythetaz.pR += dRJ.dbyJr.pR * dJA.dbythetaz.R + dRJ.dbyJz.pR * dJA.dbythetaz.z;
 		dRA.dbythetar.pz += dRJ.dbyJr.pz * dJA.dbythetar.R + dRJ.dbyJz.pz * dJA.dbythetar.z;
 		dRA.dbythetaz.pz += dRJ.dbyJr.pz * dJA.dbythetaz.R + dRJ.dbyJz.pz * dJA.dbythetaz.z;
-		dRA.dbythetar.pphi = dJA.dbythetar.phi;dRA.dbythetaz.pphi = dJA.dbythetaz.phi;dRA.dbythetaphi.pphi = dJA.dbythetaphi.phi;
-		//end fromT
+		dRA.dbythetar.pphi = dJA.dbythetar.phi;
+		dRA.dbythetaz.pphi = dJA.dbythetaz.phi;
+		dRA.dbythetaphi.pphi = dJA.dbythetaphi.phi;
+
 		if (det) {//assume only index.mphi=0 non-zero
 			(*det) = dRA.dbythetar.R * dRA.dbythetaz.z - dRA.dbythetar.z * dRA.dbythetaz.R;
 		}
 		return coord::toPosCyl(uv);
 	}
 	void Torus::zSoS(std::vector<double>& Rs, std::vector<double>& vRs, const int N,
-		double& Rmin, double& Rmax, double& Vmax) const {
+		double& Rmin, double& Rmax, double& Vmax, const double z0) const {
 		const double tol = 1e-5;
 		Rmin = 1e10, Rmax = 0, Vmax = 0;
 		for (int i = 0; i < N; i++) {
 			double thetaT_r = 2 * M_PI / (double)N * (-N / 2 + i);
-			CrossingFinder CF(this, thetaT_r);
+			CrossingFinder CF(this, thetaT_r, z0);
 			double thetaT_z, dtheta = .1, th_min = -.5 * M_PI,
 				th_max = th_min + dtheta, z_min, z_max;
 			CF.evalDeriv(th_min, &z_min); CF.evalDeriv(th_max, &z_max);
@@ -1001,12 +1147,42 @@ namespace actions {
 					th_max += dtheta; CF.evalDeriv(th_max, &z_max);
 				} while (z_min * z_max > 0);
 				thetaT_z = math::findRoot(CF, th_min, th_max, tol) - 2 * M_PI;
-				Rz = coord::PosMomCyl(from_toy(Angles(thetaT_r, thetaT_z, 0)));
+				Rz = from_toy(Angles(thetaT_r, thetaT_z, 0));
 			}
 			Rs.push_back(Rz.R); vRs.push_back(Rz.pR);
 			Rmin = fmin(Rmin, Rz.R); Rmax = fmax(Rmax, Rz.R); Vmax = fmax(Vmax, fabs(Rz.pR));
 		}
 		Rs.push_back(Rs[0]); vRs.push_back(vRs[0]);
+	}
+	void Torus::rSoS(std::vector<double>& thetas, std::vector<double>& pthetas, const double rbar,
+		const int N, double& thetamax, double& pmax) const {
+		const double tol = 1e-5;
+		thetamax = 0, pmax = 0;
+		for (int i = 0; i < N; i++) {
+			double thetaT_z = 2 * M_PI / (double)N * (-N / 2 + i);
+			r_crossingFinder RCF(this, rbar, thetaT_z);
+			double thetaT_r, dtheta = .1, th_min = 0,
+				th_max = th_min + dtheta, dr_min, dr_max;
+			RCF.evalDeriv(th_min, &dr_min); RCF.evalDeriv(th_max, &dr_max);
+			while (dr_min * dr_max > 0 && th_min < 2 * M_PI) {// plod round looking for sign change
+				th_min = th_max; dr_min = dr_max; th_max += dtheta;
+				RCF.evalDeriv(th_max, &dr_max);
+			}
+			if (th_min >= 2 * M_PI) continue;
+			thetaT_r = math::findRoot(RCF, th_min, th_max, tol);
+			coord::PosMomSph rtheta(coord::toPosMomSph(from_toy(Angles(thetaT_r, thetaT_z, 0))));
+			if (rtheta.pr < -.0001) {// keep going round
+				do {
+					th_min = th_max; dr_min = dr_max;
+					th_max += dtheta; RCF.evalDeriv(th_max, &dr_max);
+				} while (dr_min * dr_max > 0 && th_min < 2 * M_PI);
+				thetaT_z = math::findRoot(RCF, th_min, th_max, tol) - 2 * M_PI;
+				rtheta = coord::toPosMomSph(from_toy(Angles(thetaT_r, thetaT_z, 0)));
+			}
+			thetas.push_back(rtheta.theta); pthetas.push_back(rtheta.ptheta);
+			thetamax = fmax(thetamax, rtheta.theta); pmax = fmax(pmax, fabs(rtheta.ptheta));
+		}
+		thetas.push_back(thetas[0]); pthetas.push_back(pthetas[0]);
 	}
 	std::vector<std::pair<coord::PosVelCyl, double> > Torus::orbit(const Angles& theta0, double dt, double T) const {
 		std::vector<std::pair<coord::PosVelCyl, double> > traj;
@@ -1050,7 +1226,6 @@ namespace actions {
 			double kount = 0;
 			for (int k = 0; k < kmax; k++) {
 				done = math::nonlinearMultiFit(LF, params, tolerance, maxNumIter, result);
-
 				A1 = Angles(math::wrapAngle(result[0]), math::wrapAngle(result[1]), 0.0);
 				P1 = from_toy(A1); P1.phi = p.phi;
 				//from_toy set phi=0
@@ -1063,7 +1238,7 @@ namespace actions {
 					if (is_new(Atrue, As)) {
 						break;
 					}
-				} //else	printf("Max in containsPoint: %d %g\n", done, dist);
+				}
 				params[0] += .3; params[0] = math::wrapAngle(params[0]);
 				params[1] += .7;   params[1] = math::wrapAngle(params[1]);
 				kount++;
@@ -1120,7 +1295,7 @@ namespace actions {
 		GF.read(ifile);
 	}
 	/* Operators on Tori
-	 */
+	 *
 	Torus& Torus::operator *= (const double a) {
 		J *= a; freqs *= a; GF *= a; Is *= a; cs = coord::UVSph(cs.Delta * a); E* a;
 		TM = ToyMap(cs, Is);
@@ -1139,31 +1314,31 @@ namespace actions {
 	const Torus Torus::operator + (const Torus& T) const {
 		Torus T2(J + T.J, freqs + T.freqs, GF + T.GF, Is + T.Is, coord::UVSph(cs.Delta + T.cs.Delta), E + T.E);
 		return T2;
-	}
-	/* Same foe eTori
+	}*/
+	/* Same for eTori
 	 */
-	eTorus& eTorus::operator *= (const double a) {
-		J *= a; freqs *= a; GF *= a; Is *= a; cs = coord::UVSph(cs.Delta * a); E* a; pH* a;
-		TM = ToyMap(cs, Is);
-		return *this;
-	}
-	eTorus& eTorus::operator += (const eTorus& T) {
-		J += T.J; freqs += T.freqs; GF += T.GF; Is += T.Is;
-		cs = coord::UVSph(cs.Delta += T.cs.Delta); E + T.E; pH + T.pH;
-		TM = ToyMap(cs, Is);
-		return *this;
-	}
-	const eTorus eTorus::operator * (const double a) const {
-		eTorus T2(J * a, freqs * a, GF * a, Is * a, coord::UVSph(cs.Delta * a), E * a, pH * a);
-		return T2;
-	}
-	const eTorus eTorus::operator + (const eTorus& T) const {
-		eTorus T2(J + T.J, freqs + T.freqs, GF + T.GF, Is + T.Is, coord::UVSph(cs.Delta + T.cs.Delta),
-			E + T.E, pH + T.pH);
-		return T2;
-	}
-	/* Gather all terms in the pH that are harmonics of the specified line
-	 */
+	 /*	eTorus& eTorus::operator *= (const double a) {
+			 J *= a; freqs *= a; GF *= a; Is *= a; cs = coord::UVSph(cs.Delta * a); E* a; pH* a;
+			 TM = ToyMap(cs, Is);
+			 return *this;
+		 }
+		 eTorus& eTorus::operator += (const eTorus& T) {
+			 J += T.J; freqs += T.freqs; GF += T.GF; Is += T.Is;
+			 cs = coord::UVSph(cs.Delta += T.cs.Delta); E + T.E; pH + T.pH;
+			 TM = ToyMap(cs, Is);
+			 return *this;
+		 }
+		 const eTorus eTorus::operator * (const double a) const {
+			 eTorus T2(J * a, freqs * a, GF * a, Is * a, coord::UVSph(cs.Delta * a), E * a, pH * a);
+			 return T2;
+		 }
+		 const eTorus eTorus::operator + (const eTorus& T) const {
+			 eTorus T2(J + T.J, freqs + T.freqs, GF + T.GF, Is + T.Is, coord::UVSph(cs.Delta + T.cs.Delta),
+				 E + T.E, pH + T.pH);
+			 return T2;
+		 }*/
+		 /* Gather all terms in the pH that are harmonics of the specified line
+		  */
 	std::vector<std::complex<double> > PerturbingHamiltonian::get_hn(const GenFncIndex& I,
 		std::vector<float>& multiples) const {
 		std::vector<std::complex<double> > Hs;
@@ -1373,7 +1548,6 @@ namespace actions {
 			Jsmax *= 1.5; JF.evalDeriv(Jsmax, &val2);
 		}
 		double Js_iso = math::findRoot(JF, Jsmin, Jsmax, relToler);
-		//	printf("%g %g %g %g\n",val1,val2,Js_iso,ISO.g(Js_iso));
 		double b_iso = Rsh / ISO.g(Js_iso);
 		Is = Isochrone(Js_iso, b_iso);
 #ifdef PLT
@@ -1407,108 +1581,165 @@ namespace actions {
 		pl.grend();
 #endif
 	}
+	GenFncIndices prune(GenFncIndices& indices, std::vector<double> params) {
+		double maxP = 0;
+		for (int i = 0; i < indices.size(); i++)
+			maxP = fmax(maxP, fabs(params[i]));
+		const double thresh = 1e-5 * maxP;
+		GenFncIndices newIndices;
+		std::vector<double> values;
+		for (int i = 0; i < indices.size(); i++) {
+			if (fabs(params[i]) < thresh) continue;
+			newIndices.push_back(indices[i]);
+			values.push_back(params[i]);
+		}
+		for (int i = indices.size(); i < params.size(); i++)
+			values.push_back(params[i]);
+		params.clear();
+		params = values;
+		return newIndices;
+	}
 	Torus TorusGenerator::fitTorus(const Actions& J, const double tighten) const {
+		double tolerance = 1e-9;//controls optimisation of the given Sn
+		double Jscale, freqScale, Rsh;
+		Isochrone Is;
+		coord::UVSph cs;
+		setConsts(J, Jscale, freqScale, Rsh, Is, cs);
+		std::vector<double> params;
+		int nrmax = 5, nzmax = 4;// nzmax must be even
+		double Hbar, Hdisp = 1e20;
+		bool converged = false;
+		int Loop = 0, MaxLoop = 10, maxNumIter = 10;
+		GenFncIndices indices = makeGridIndices(nrmax, nzmax);
+		GenFncFitFracs fracs;
+		params.resize(indices.size() + 2 * fracs.size(), 0);
+		double tol = defaultTol * tighten;
+		std::vector<double> rep;
+		do {
+			GenFncFitSeries GFFS(indices, fracs, J);
+			torusFitter TF(J, pot, Is, cs, GFFS);
+			//if(fracs.size()>0) TF.testit(params,GFFS.numParams()-1);
+			if (std::isnan(Hdisp)) exit(0);
+			//			printf("TF: %d angles, %d terms, %d fracs, %d parameters\n",
+			//			       TF.numValues(),GFFS.numTerms(),GFFS.numFracs(),TF.numVars());
+			try {
+				//				Marquardt MQDT(TF, params);
+				//				Hdisp=MQDT.iterate(params,0.001);
+				NANbar = 0;
+				int numIter = math::nonlinearMultiFit(TF, &params[0], tolerance, maxNumIter, &params[0],&Hdisp);
+				Hdisp = sqrt(Hdisp);
+				rep.push_back(Hdisp);
+				if (NANbar > 0) printf("\ndH :%g NANfrac %f %f\n", Hdisp, NANfrac, NANbar);
+				converged = (Hdisp < tol * freqScale * Jscale);
+			}
+			catch (std::exception& e) {
+				std::cout << "Exception in fitTorus: " << e.what() << '\n';
+			}
+			if (converged) break;
+			Loop++;
+			if (Loop < MaxLoop) indices = GFFS.expand(params, fracs);
+		} while (Loop < MaxLoop);
+		//indices = prune(indices,params);
+		GenFncFitSeries GFFS(indices, fracs, J);
+		if (!converged) {
+			printf("\nfitTorus failed to converge: %e against target %e  ",
+				Hdisp, tol * freqScale * Jscale);
+			printf("%zd indices ", indices.size());
+			printf("NANfracs: %f %f, resids:\n", NANfrac, NANbar);
+			for (int i = 0; i < rep.size(); i++) printf("%7.2e ", rep[i]); printf("\n");
+		}
+		torusFitter TF(J, pot, Is, cs, GFFS);
+		Frequencies freqs;
+		GenFncDerivs dPdJ;
+		Hdisp = TF.fitAngleMap(&params[0], Hbar, freqs, dPdJ);
+		GenFncFracs Fracs;
+		for (unsigned int j = 0; j < fracs.size(); j++)
+			Fracs.push_back(GenFncFrac(fracs[j],
+				&params[indices.size() + 2 * j], &dPdJ[indices.size() + 2 * j]));
+		params.resize(indices.size()); dPdJ.resize(indices.size());
+		GenFnc G(indices, params, dPdJ, Fracs);
+		return Torus(J, freqs, G, Is, cs, Hbar);
+	}
+	Torus TorusGenerator::fitBaseTorus(const Actions& J, const double tighten) const {
 		double tolerance = 1e-8;//controls optimisation of the given Sn
 		double Jscale, freqScale, Rsh;
 		Isochrone Is;
 		coord::UVSph cs;
 		setConsts(J, Jscale, freqScale, Rsh, Is, cs);
 		std::vector<double> params;
-		int nrmax = 3, nzmax = 4;// nzmax must be even
+		int nrmax = 0, nzmax = 0;// nzmax must be even
 		double Hbar, Hdisp = 1e20;
-		bool converged = false;
-		int Loop = 0, MaxLoop = 10, maxNumIter = 10;
 		GenFncIndices indices = makeGridIndices(nrmax, nzmax);
-		double tol = defaultTol * tighten;
-		std::vector<double> rep;
-		do {
-			GenFncFit GFF(indices, J);
-			params.resize(indices.size());
-			torusFitter TF(J, pot, Is, cs, GFF);
-			try {
-				int numIter = math::nonlinearMultiFit(TF, &params[0], tolerance, maxNumIter, &params[0]);
-				Hdisp = sqrt(TF.computeHamiltonianDisp(params, Hbar));
-				rep.push_back(Hdisp);
-				converged = (Hdisp < tol * freqScale * Jscale);
-				if (TF.giveNANfrac() != 0)
-					printf("Fraction %7.3f of H vals NANs\n", TF.giveNANfrac());
-			}
-			catch (std::exception& e) {
-				std::cout << "Exception in fitTorus: " << e.what() << '\n';
-			}
-			if (converged) break;
-			Loop++;
-			if (Loop < MaxLoop) indices = GFF.expand(params);
-		} while (Loop < MaxLoop);
-		if (!converged) {
-			printf("fitTorus failed to converge for target %g\n", tol * freqScale * Jscale);
-			for (int i = 0; i < rep.size(); i++) printf("%g ", rep[i]); printf("\n");
-		}
-		GenFncFit GFF(indices, J);
-		torusFitter TF(J, pot, Is, cs, GFF);
-#ifdef TESTIT
-		test_it(J, params);
-#endif
+		actions::GenFncFitFracs fracs;
+		GenFncFitSeries GFFS(indices, fracs, J);
+		torusFitter TF(J, pot, Is, cs, GFFS);
 		Frequencies freqs;
-		GenFncDerivs derivs;
-		Hdisp = TF.fitAngleMap(&params[0], Hbar, freqs, derivs);
-		//printf("Hbar: %f, freqs: %f\n", Hbar, freqs.Omegaz);
-		GenFnc G(indices, params, derivs);
+		GenFncDerivs dPdJ;
+		Hdisp = TF.fitAngleMap(&params[0], Hbar, freqs, dPdJ);
+		GenFncFracs Fracs;
+		GenFnc G(indices, params, dPdJ, Fracs);
 		return Torus(J, freqs, G, Is, cs, Hbar);
 	}
-	Torus TorusGenerator::fitFrom(const Actions& J, const Torus& T, const double tighten) const {
-		double tolerance = 1e-8;//controls optimisation of the given Sn
-		double freqScale = .5 * (T.freqs.Omegar + T.freqs.Omegaphi);
-		double Jscale = J.Jr + J.Jz;
-		Isochrone Is = T.Is;
-		coord::UVSph cs = T.cs;
-		GenFncIndices indices = T.GF.indices;
-		std::vector<double> params = T.GF.values;
-		double Hbar, Hdisp = 1e20;
-		bool converged = false;
-		int Loop = 0, MaxLoop = 10, maxNumIter = 10;
-		double tol = defaultTol * tighten;
-		std::vector<double> rep;
-		do {
-			GenFncFit GFF(indices, J);
-			params.resize(indices.size());
-			torusFitter TF(J, pot, Is, cs, GFF);
-			try {
-				int numIter = math::nonlinearMultiFit(TF, &params[0], tolerance, maxNumIter, &params[0]);
-				Hdisp = sqrt(TF.computeHamiltonianDisp(params, Hbar));
-				rep.push_back(Hdisp);
-				converged = (Hdisp < tol * freqScale * Jscale);
-				if (TF.giveNANfrac() != 0)
-					printf("Fraction %7.3f of H vals NANs\n", TF.giveNANfrac());
+	Torus TorusGenerator::fitFrom(const Actions& J, const Torus& T, const double tighten) const{
+			double tolerance = 1e-9;//controls optimisation of the given Sn
+			double freqScale = .5*(T.freqs.Omegar + T.freqs.Omegaphi);
+			double Jscale = J.Jr + J.Jz;
+			Isochrone Is(T.Is);
+			coord::UVSph cs(T.cs);
+			
+			GenFncFitFracs fracs;
+			//double Rsh; setConsts(J, Jscale, freqScale, Rsh, Is, cs);
+			GenFncIndices indices(T.GF.indices);
+			std::vector<double> params(T.GF.values);
+			double Hbar, Hdisp = 1e20;
+			bool converged = false;
+			int Loop = 0, MaxLoop = 10, maxNumIter = 10;
+			double tol = defaultTol * tighten;
+			std::vector<double> rep;
+			do {
+				GenFncFitSeries GFFS(indices, fracs, J);
+				torusFitter TF(J, pot, Is, cs, GFFS);
+				//if(fracs.size()>0) TF.testit(params,GFFS.numParams()-1);
+				if (std::isnan(Hdisp)) exit(0);
+				//			printf("TF: %d angles, %d terms, %d fracs, %d parameters\n",
+				//			       TF.numValues(),GFFS.numTerms(),GFFS.numFracs(),TF.numVars());
+				try {
+					//				Marquardt MQDT(TF, params);
+					//				Hdisp=MQDT.iterate(params,0.001);
+					NANbar = 0;
+					int numIter = math::nonlinearMultiFit(TF, &params[0], tolerance, maxNumIter, &params[0],&Hdisp);
+					Hdisp = sqrt(Hdisp);
+					rep.push_back(Hdisp);
+					if (NANbar > 0) printf("\ndH :%g NANfrac %f %f\n", Hdisp, NANfrac, NANbar);
+					converged = (Hdisp < tol * freqScale * Jscale);
+				}
+				catch (std::exception& e) {
+					std::cout << "Exception in fitTorus: " << e.what() << '\n';
+				}
+				if (converged) break;
+				Loop++;
+				if (Loop < MaxLoop) indices = GFFS.expand(params, fracs);
+			} while (Loop < MaxLoop);
+			//indices = prune(indices,params);
+			GenFncFitSeries GFFS(indices, fracs, J);
+			if (!converged) {
+				printf("\nfitTorus failed to converge: %e against target %e  ",
+					Hdisp, tol * freqScale * Jscale);
+				printf("%zd indices ", indices.size());
+				printf("NANfracs: %f %f, resids:\n", NANfrac, NANbar);
+				for (int i = 0; i < rep.size(); i++) printf("%7.2e ", rep[i]); printf("\n");
 			}
-			catch (std::exception& e) {
-				std::cout << "Exception in fitTorus: " << e.what() << '\n';
-			}
-			if (converged) break;
-			Loop++;
-			if (Loop < MaxLoop) indices = GFF.expand(params);
-		} while (Loop < MaxLoop);
-		if (!converged) {
-			printf("fitTorus failed to converge for target %g\n", tol * freqScale * Jscale);
-			for (int i = 0; i < rep.size(); i++) printf("%g ", rep[i]); printf("\n");
-		}
-		GenFncFit GFF(indices, J);
-		torusFitter TF(J, pot, Is, cs, GFF);
-#ifdef TESTIT
-		test_it(J, params);
-#endif
-		Frequencies freqs;
-		GenFncDerivs derivs;
-		Hdisp = TF.fitAngleMap(&params[0], Hbar, freqs, derivs);
-		//printf("Hbar: %f, freqs: %f\n", Hbar, freqs.Omegaz);
-		GenFnc G(indices, params, derivs);
-		return Torus(J, freqs, G, Is, cs, Hbar);
-	}
-	eTorus TorusGenerator::fiteTorus(const Actions& J, const double tol, const potential::BasePotential* ePhi) {
-		Torus T = fitTorus(J, tol);
-		int nf = 128;
-		PerturbingHamiltonian pH(get_pH(T, nf, true, ePhi));
-		return eTorus(T, pH);
+			torusFitter TF(J, pot, Is, cs, GFFS);
+			Frequencies freqs;
+			GenFncDerivs dPdJ;
+			Hdisp = TF.fitAngleMap(&params[0], Hbar, freqs, dPdJ);
+			GenFncFracs Fracs;
+			for (unsigned int j = 0; j < fracs.size(); j++)
+				Fracs.push_back(GenFncFrac(fracs[j],
+					&params[indices.size() + 2 * j], &dPdJ[indices.size() + 2 * j]));
+			params.resize(indices.size()); dPdJ.resize(indices.size());
+			GenFnc G(indices, params, dPdJ, Fracs);
+			return Torus(J, freqs, G, Is, cs, Hbar);
 	}
 	eTorus TorusGenerator::fiteTorus(const Actions& J, const potential::BasePotential* ePhi) {
 		Torus T = fitTorus(J);
@@ -1533,15 +1764,95 @@ namespace actions {
 			double frat = T.freqs.Omegar / T.freqs.Omegaz;
 			double dJr = (1 - fac) * Jnext.Jr;
 			Jnext.Jr -= dJr; Jnext.Jz += dJr * frat;
-			//printf("Next Jr: %f\n",Jnext.Jr);
 			Torus T1(fitTorus(Jnext));
-			T1 *= 0.5; T1 += T * 0.5;
+			T1 = interpTorus(0.5, T, T1);
+			//			T1 *= 0.5; T1 += T * 0.5;
 			double frat1 = T1.freqs.Omegar / T1.freqs.Omegaz;
 			Jnext.Jz = Jnext.Jz + dJr * frat - dJr * frat1;
+			printf("\nNext Jr/Jz: %f Rsh: %f\n", Jnext.Jr / Jnext.Jz, getRsh(Jnext));
 			T = fitTorus(Jnext);
 			Tgrd.push_back(T);
 		}
 		return Tgrd;
+	}
+
+	EXP ActionAngles ActionFinderTG::actionAngles(const coord::PosVelCyl& point, Frequencies* freq) const {
+		double E = potential::totalEnergy(*pot, point);
+		if (E > 0) {
+			printf("Energy is: %f and positive so no orbit\n", E);
+			return ActionAngles(actions::Actions(NAN, NAN, NAN), actions::Angles(NAN, NAN, NAN));
+		}
+		const double tol = 1e-10;
+		double phi0 = point.phi, last_diff = 1e6;
+		math::wrapAngle(phi0);
+		//		while(fabs(phi0)>M_PI) phi0 += phi0>M_PI? -2*M_PI : 2*M_PI;
+		coord::PosMomCyl P0(point.R, point.z, phi0, point.vR, point.vz, point.vphi * point.R);
+		ActionAngles aa(AF.actionAngles(point));
+		Actions J(aa); Angles trueA(aa);
+		Torus T(TG.fitTorus(J));
+		Angles aT(T.GF.toyA(trueA));
+		std::vector<double> rep;
+		int kount = 0;
+		while (kount < 10) {
+			if (kount == 1)
+				T = TG.fitTorus(J);
+			else if(kount>1)
+				T = TG.fitFrom(J,T);//fitTorus(J);//
+			coord::PosMomCyl P(T.from_toy(aT));
+			double phi_diff = P0.phi - P.phi;
+			if (fabs(phi_diff) > M_PI) {
+				P.phi += phi_diff > 0 ? 2 * M_PI : -2 * M_PI;
+				phi_diff = P0.phi - P.phi;
+			}
+			std::vector<double> dRp = { P0.R - P.R,P0.z - P.z,P0.phi - P.phi,
+			P0.pR - P.pR,P0.pz - P.pz,P0.pphi - P.pphi };
+			double diff = 0;
+			for (int i = 0; i < 6; i++) diff += pow_2(dRp[i]);
+			rep.push_back(diff);
+			if ((diff < tol)) {
+				trueA = T.GF.trueA(aT);
+				if (freq) *freq = T.freqs;
+				break;
+			}
+			DerivAngCyl dRdt; DerivAct<coord::Cyl> dRdJ;
+			T.PosDerivs(aT, dRdt); T.PosDerivJ(aT, dRdJ);
+			math::Matrix<double> M(6, 6);
+			M(0, 0) = dRdt.dbythetar.R; M(0, 1) = dRdt.dbythetaz.R; M(0, 2) = dRdt.dbythetaphi.R;
+			M(0, 3) = dRdJ.dbyJr.R; M(0, 4) = dRdJ.dbyJz.R; M(0, 5) = dRdJ.dbyJphi.R;
+			M(1, 0) = dRdt.dbythetar.z; M(1, 1) = dRdt.dbythetaz.z; M(1, 2) = dRdt.dbythetaphi.z;
+			M(1, 3) = dRdJ.dbyJr.z; M(1, 4) = dRdJ.dbyJz.z; M(1, 5) = dRdJ.dbyJphi.z;
+			M(2, 0) = dRdt.dbythetar.phi; M(2, 1) = dRdt.dbythetaz.phi; M(2, 2) = dRdt.dbythetaphi.phi;
+			M(2, 3) = dRdJ.dbyJr.phi; M(2, 4) = dRdJ.dbyJz.phi; M(2, 5) = dRdJ.dbyJphi.phi;
+			M(3, 0) = dRdt.dbythetar.pR; M(3, 1) = dRdt.dbythetaz.pR; M(3, 2) = dRdt.dbythetaphi.pR;
+			M(3, 3) = dRdJ.dbyJr.pR; M(3, 4) = dRdJ.dbyJz.pR; M(3, 5) = dRdJ.dbyJphi.pR;
+			M(4, 0) = dRdt.dbythetar.pz; M(4, 1) = dRdt.dbythetaz.pz; M(4, 2) = dRdt.dbythetaphi.pz;
+			M(4, 3) = dRdJ.dbyJr.pz; M(4, 4) = dRdJ.dbyJz.pz; M(4, 5) = dRdJ.dbyJphi.pz;
+			M(5, 0) = dRdt.dbythetar.pphi; M(5, 1) = dRdt.dbythetaz.pphi; M(5, 2) = dRdt.dbythetaphi.pphi;
+			M(5, 3) = dRdJ.dbyJr.pphi; M(5, 4) = dRdJ.dbyJz.pphi; M(5, 5) = dRdJ.dbyJphi.pphi;
+			math::LUDecomp LUM(M);
+			std::vector<double> dJt = LUM.solve(dRp);
+			aT.thetar += dJt[0]; aT.thetaz += dJt[1]; aT.thetaphi += dJt[2];
+			/*			if (fabs(dJt[3]) > 0.2 * J.Jr) {
+							J.Jr *= (1 + 0.2 * math::sign(dJt[3]));
+						}
+						else {
+							J.Jr += dJt[3];
+						}if (fabs(dJt[4]) > 0.2 * J.Jz) {
+							J.Jz *= (1 + 0.2 * math::sign(dJt[4]));
+						}
+						else {
+							J.Jz += dJt[4];
+						}*/
+			J.Jr += dJt[3]; J.Jz += dJt[4];
+			J.Jphi += dJt[5];
+			last_diff = diff; kount++;
+		}
+		if (kount > 4) {
+			printf("kount %d ", kount);
+			for (int i = 0;i < rep.size();i++) printf("%g ", rep[i]);
+			printf("\n");
+		}
+		return ActionAngles(J, trueA);
 	}
 	EXP ActionAngles ActionFinderTG::actionAngles2(const coord::PosVelCyl& point, Frequencies* freq) const {
 		double E = potential::totalEnergy(*pot, point);
@@ -1564,28 +1875,94 @@ namespace actions {
 		Actions JT2 = T.GF.toyJ(J, tT);
 		double diff = 1e3;
 		while (kount < 10) {
-			if (kount==1) {
+			if (kount == 1) {
 				T = Torus(TG.fitTorus(J));
-				aaT= T.TM.pq2aa(P0);
+				aaT = T.TM.pq2aa(P0);
 				JT = Actions(aaT);
 				tT = Angles(aaT);
 			}
 			else if (kount > 0) T = TG.fitFrom(J, T);
 			Actions JT1 = T.GF.toyJ(J, tT);
-			std::vector<double> df = {JT.Jr-JT1.Jr,JT.Jz - JT1.Jz,0.0};
-			
+			std::vector<double> df = { JT.Jr - JT1.Jr,JT.Jz - JT1.Jz,0.0 };
 			math::Matrix<double> dthetadthetaT(3, 3);
 			T.GF.dtbydtT_Jacobian(tT, dthetadthetaT);
-			math::Matrix<double> Mat3(3, 3);
 			math::LUDecomp LUM(dthetadthetaT);
-			math::Matrix<double> inv=LUM.inverse(3);
-			std::vector<double> dJt(3,0.0);
+			math::Matrix<double> inv = LUM.inverse(3);
+			std::vector<double> dJt(3, 0.0);
 			math::blas_dgemv(math::CblasTrans, 1.0, inv, df, 0.0, dJt);
 			//std::vector<double> dJt = LUM.solve(df);
 			diff = sqrt(pow_2(dJt[0]) + pow_2(dJt[1]));
-			J.Jr += dJt[0]; J.Jz += dJt[1];J.Jphi += dJt[2];
+			J.Jr += dJt[0]; J.Jz += dJt[1];
 			if (sqrt(pow_2(dJt[0]) + pow_2(dJt[1])) < tol) {
-				if(kount>0) {
+				if (kount > 0) {
+					if (freq) *freq = T.freqs;
+					trueA = T.GF.trueA(tT);
+					//printf("number of iterations: %d\n", kount);
+					break;
+				}
+			}
+			kount++;
+		}
+		//		std::cout << kount << '\n';
+		return ActionAngles(J, trueA);
+	}
+	EXP ActionAngles ActionFinderTG::actionAngles3(const coord::PosVelCyl& point, Frequencies* freq) const {
+		double E = potential::totalEnergy(*pot, point);
+		if (E > 0) {
+			printf("Energy is: %f and positive so no orbit\n", E);
+			return ActionAngles(actions::Actions(NAN, NAN, NAN), actions::Angles(NAN, NAN, NAN));
+		}
+		const double tol = .5e-5;
+		double phi0 = point.phi, last_diff = 1e6;
+		while (fabs(phi0) > M_PI) phi0 += phi0 > M_PI ? -M_PI : M_PI;
+		coord::PosMomCyl P0(point.R, point.z, phi0, point.vR, point.vz, point.vphi * point.R);
+		Angles trueA;
+		Actions J0(AF.actions(point));
+		actions::Torus T0(TG.fitTorus(J0));
+		double deltaE = T0.E - E;
+		double Jphi = P0.pphi;
+		Actions J1(J0.Jr - deltaE / (T0.freqs.Omegaz + T0.freqs.Omegar), J0.Jz - deltaE / (T0.freqs.Omegaz+ T0.freqs.Omegar), Jphi);
+		double K0 = -T0.freqs.Omegar / T0.freqs.Omegaz;
+		double deltaJ = -0.02;
+		Actions J10(J1.Jr - deltaJ, J1.Jz - K0 * deltaJ, Jphi);
+		Torus T1(TG.fitTorus(J10));
+		double K = -T1.freqs.Omegar / T1.freqs.Omegaz;
+		
+		Actions J2(J1.Jr+deltaJ, J1.Jz +K* deltaJ, Jphi);
+		Torus T2(TG.fitTorus(J2));
+		//std::cout << "E:" <<T0.E<<" "<< T1.E << " " << T2.E << '\n';
+		
+		std::vector<double> rep;
+		int kount = 0;
+		
+		double diff = 1e3;
+		double x = 0;
+		Actions J;
+		Torus T=T2;
+		while (kount < 10) {
+			T = interpTorus(x, T1, T2);
+			ActionAngles aaT = T.TM.pq2aa(P0);
+			Angles tT(aaT);
+			Actions JT(aaT);
+			J = T.J;
+			K = -T.freqs.Omegar / T.freqs.Omegaz;
+			Actions JT1 = T.GF.toyJ(J, tT);
+			std::vector<double> df = { JT.Jr - JT1.Jr,JT.Jz - JT1.Jz,0.0 };
+			math::Matrix<double> M(3, 3);
+			T.GF.dtbydtT_Jacobian(tT, M);
+			std::vector<double> dJt(3, 0.0);
+			dJt[0] = df[0] / (2 * (M(0, 0) + K * M(1, 0)));
+			dJt[1] = df[1] / (2 * (M(0, 1)/K +M(1, 1)));
+			//std::cout << dJt[1] << " " << K * dJt[0] << '\n';
+			double dJtrdx= -((M(0, 0) + K * M(1, 0))*(J2.Jr-J1.Jr)+(J2.Jz-J1.Jz)* (M(1, 0) +  M(0, 0)/K));
+			double dJtzdx= -((M(0, 1) + K * M(1, 1))*(J2.Jr-J1.Jr)+(J2.Jz-J1.Jz)* (M(1, 1) +  M(0, 1)/K));
+			x += df[0] / dJtrdx;
+			if (x > 1)x = 1;
+			if (x < 0) x = 0;
+			//std::cout <<"x:"<< x << '\n';
+			//std::cout << "x2:" << df[1]/dJtzdx << '\n';
+			if (fabs(sqrt(pow_2(df[0])+pow_2(df[1]))) < tol) {
+				if (kount > 0) {
 					if (freq) *freq = T.freqs;
 					trueA = T.GF.trueA(tT);
 					break;
@@ -1593,114 +1970,7 @@ namespace actions {
 			}
 			kount++;
 		}
-		std::cout << kount << '\n';
-		return ActionAngles(J, trueA);
-	}
-	EXP ActionAngles ActionFinderTG::actionAngles(const coord::PosVelCyl& point, Frequencies* freq) const {
-		double E = potential::totalEnergy(*pot, point);
-		if (E > 0) {
-			printf("Energy is: %f and positive so no orbit\n", E);
-			return ActionAngles(actions::Actions(NAN, NAN, NAN), actions::Angles(NAN, NAN, NAN));
-		}
-		const double tol = 1e-8;
-		double phi0 = point.phi, last_diff = 1e6;
-		while (fabs(phi0) > M_PI) phi0 += phi0 > M_PI ? -M_PI : M_PI;
-		coord::PosMomCyl P0(point.R, point.z, phi0, point.vR, point.vz, point.vphi * point.R);
-		Angles trueA;
-		ActionAngles aa(AF.actionAngles(point));
-		Actions J(aa);
-		Torus T(TG.fitTorus(J));
-		Angles aT = T.GF.toyA(aa);
-		std::vector<double> rep;
-		int kount = 0;
-		while (kount < 10) {
-			if (kount == 1) {
-				T = Torus(TG.fitTorus(J));
-			}
-			else if (kount > 0) T = TG.fitFrom(J, T);
-			coord::PosMomCyl P(T.from_toy(aT));
-			double phi_diff = P0.phi - P.phi;
-			if (fabs(phi_diff) > M_PI) {
-				P.phi += phi_diff > 0 ? 2 * M_PI : -2 * M_PI;
-			}
-			/*std::vector<double> dRp = {P0.R - P.R,P0.z - P.z,P0.phi - P.phi,
-			P0.pR - P.pR,P0.pz - P.pz,P0.pphi - P.pphi };
-			//*/
-			
-			std::vector<double> dRp = { P0.R - P.R,P0.z - P.z,
-			P0.pR - P.pR,P0.pz - P.pz };
-			double diff = 0;
-			//for (int i = 0; i < 6; i++) diff += pow_2(dRp[i]);
-			for (int i = 0; i < 4; i++) diff += pow_2(dRp[i]);
-			rep.push_back(diff);
-			//
-			if ((diff)< tol) {
-				aT.thetaphi = T.TM.pq2aa(P0).thetaphi;
-				//aT.thetaphi = T.Is.pq2aa(P0).thetaphi;
-				trueA = T.GF.trueA(aT);
-				if (freq) *freq = T.freqs;
-				break;
-			}
-			DerivAngCyl dRdt; DerivAct<coord::Cyl> dRdJ;
-			ActionAngles AA(J, aT);
-			T.PosDerivs(AA, dRdt); T.PosDerivJ(AA, dRdJ);
-			//math::Matrix<double> M(6, 6);
-			/*
-			M(0, 0) = dRdt.dbythetar.R; M(0, 1) = dRdt.dbythetaz.R; M(0, 2) = dRdt.dbythetaphi.R;
-			M(0, 3) = dRdJ.dbyJr.R; M(0, 4) = dRdJ.dbyJz.R; M(0, 5) = dRdJ.dbyJphi.R;
-			M(1, 0) = dRdt.dbythetar.z; M(1, 1) = dRdt.dbythetaz.z; M(1, 2) = dRdt.dbythetaphi.z;
-			M(1, 3) = dRdJ.dbyJr.z; M(1, 4) = dRdJ.dbyJz.z; M(1, 5) = dRdJ.dbyJphi.z;
-			M(2, 0) = dRdt.dbythetar.phi; M(2, 1) = dRdt.dbythetaz.phi; M(2, 2) = dRdt.dbythetaphi.phi;
-			M(2, 3) = dRdJ.dbyJr.phi; M(2, 4) = dRdJ.dbyJz.phi; M(2, 5) = dRdJ.dbyJphi.phi;
-			M(3, 0) = dRdt.dbythetar.pR; M(3, 1) = dRdt.dbythetaz.pR; M(3, 2) = dRdt.dbythetaphi.pR;
-			M(3, 3) = dRdJ.dbyJr.pR; M(3, 4) = dRdJ.dbyJz.pR; M(3, 5) = dRdJ.dbyJphi.pR;
-			M(4, 0) = dRdt.dbythetar.pz; M(4, 1) = dRdt.dbythetaz.pz; M(4, 2) = dRdt.dbythetaphi.pz;
-			M(4, 3) = dRdJ.dbyJr.pz; M(4, 4) = dRdJ.dbyJz.pz; M(4, 5) = dRdJ.dbyJphi.pz;
-			M(5, 0) = dRdt.dbythetar.pphi; M(5, 1) = dRdt.dbythetaz.pphi; M(5, 2) = dRdt.dbythetaphi.pphi;
-			M(5, 3) = dRdJ.dbyJr.pphi; M(5, 4) = dRdJ.dbyJz.pphi; M(5, 5) = dRdJ.dbyJphi.pphi;
-			*/
-			math::Matrix<double> M(4, 4);
-			M(0, 0) = dRdt.dbythetar.R; M(0, 1) = dRdt.dbythetaz.R; 
-			M(0, 2) = dRdJ.dbyJr.R; M(0, 3) = dRdJ.dbyJz.R; 
-			M(1, 0) = dRdt.dbythetar.z; M(1, 1) = dRdt.dbythetaz.z; 
-			M(1, 2) = dRdJ.dbyJr.z; M(1, 3) = dRdJ.dbyJz.z;
-			M(2, 0) = dRdt.dbythetar.pR; M(2, 1) = dRdt.dbythetaz.pR;
-			M(2, 2) = dRdJ.dbyJr.pR; M(2, 3) = dRdJ.dbyJz.pR; 
-			M(3, 0) = dRdt.dbythetar.pz; M(3, 1) = dRdt.dbythetaz.pz;
-			M(3, 2) = dRdJ.dbyJr.pz; M(3, 3) = dRdJ.dbyJz.pz;
-			
-			
-
-			math::LUDecomp LUM(M);
-			std::vector<double> dJt = LUM.solve(dRp);
-			aT.thetar += dJt[0]; aT.thetaz += dJt[1];
-			//aT.thetaphi += dJt[2];
-			//J.Jr += dJt[3]; J.Jz += dJt[4];
-			//J.Jphi += dJt[5];
-			if (fabs(dJt[2]) > 0.2 * J.Jr) {
-							J.Jr *= (1 + 0.2 * math::sign(dJt[2]));
-						}
-						else {
-							J.Jr += dJt[2];
-						}if (fabs(dJt[3]) > 0.2 * J.Jz) {
-							J.Jz *= (1 + 0.2 * math::sign(dJt[3]));
-						}
-						else {
-							J.Jz += dJt[3];
-			}
-			//*/
-
-			last_diff = diff; kount++;
-		}
-		//std::cout << kount <<" "<<diff1<< '\n';
-		if (kount == 9) {
-			printf("failed to converge\n");
-		}
-		if (kount > 0) {
-			printf("kount %d ", kount);
-			for (int i = 0;i < rep.size();i++) printf("%g ", rep[i]);
-			printf("\n");
-		}
+		//std::cout << kount << '\n';
 		return ActionAngles(J, trueA);
 	}
 	//end fromT
