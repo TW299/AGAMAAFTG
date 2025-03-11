@@ -156,12 +156,16 @@ namespace actions {
 		coord::UVSph cs;
 		Isochrone Is;
 		ToyMap TM;
+		GenFncIndices tried;
 		/* Creator called by TorusGenerator rather than users */
 		Torus(const Actions& _J, const Frequencies& _freqs, const GenFnc& _GF,
 			const Isochrone& _Is, const coord::UVSph& _cs, double _E) :
 			J(_J), freqs(_freqs), GF(_GF), Is(_Is), cs(_cs), E(_E), TM(_cs, _Is) {
-			//printf("Torus created: %d params\n",_GF.numParams());
 		}
+		/*		Torus(const Actions& _J, const Frequencies& _freqs, const GenFnc& _GF,
+					  const Isochrone& _Is, const coord::UVSph& _cs, double _E, GenFncIndices _tried) :
+					J(_J), freqs(_freqs), GF(_GF), Is(_Is), cs(_cs),
+					E(_E), tried(_tried), TM(_cs,_Is) {}*/
 		void printGF(void) {
 			GF.print();
 		}
@@ -173,7 +177,10 @@ namespace actions {
 			double* det = NULL) const;/*dR/dtheta etx*/
 		/* compute the surface of section z=0 pz>0 */
 		void zSoS(std::vector<double>& R, std::vector<double>& vR, const int N,
-			double& Rmin, double& Rmax, double& Vmax) const;
+			double& Rmin, double& Rmax, double& Vmax, const double z0 = 0) const;
+		/* compute the surface of section R=Rbar pR>0 */
+		void rSoS(std::vector<double>& z, std::vector<double>& vz, const double Rbar, const int N,
+			double& zmax, double& Vmax) const;
 		Frequencies Omega(void) const {
 			return freqs;
 		}
@@ -197,17 +204,17 @@ namespace actions {
 	};
 
 	//interpolate between 2 tori
-	EXP Torus interpT(const double x, Torus T0, Torus T1);
+	EXP Torus interpTorus(const double x, const Torus& T0, const Torus& T1);
 
 	//interpolae on an indexed array of tori 
-	EXP Torus InterpTorus(std::vector<Torus>&, std::vector<double>&, double x);
+	EXP Torus interpTorus(const double x, std::vector<double>&, std::vector<Torus>&);
 
 	/* The class of tori that include perturbing Hamiltonians. Can be
 	 * interpolated */
 	class EXP eTorus : public Torus {
 	private:
-		PerturbingHamiltonian pH;
 	public:
+		PerturbingHamiltonian pH;
 		eTorus(const Actions& _J, const Frequencies& _freqs, const GenFnc& _GF,
 			const Isochrone& _Is, const coord::UVSph& _cs, double _E,
 			const PerturbingHamiltonian& _pH) :
@@ -231,10 +238,10 @@ namespace actions {
 	};
 
 	//interpolate between 2 tori
-	EXP eTorus interpT(const double x, const eTorus T0, const eTorus T1);
+	EXP eTorus interpeTorus(const double x, const eTorus& T0, const eTorus& T1);
 
 	//interpolae on an indexed array of tori 
-	EXP eTorus InterpTorus(std::vector<eTorus>&, std::vector<double>&, double x);
+	EXP eTorus interpeTorus(const double x, std::vector<double>&, std::vector<eTorus>&);
 
 	/*
 	 * Class for fitting torus to an orbit
@@ -278,6 +285,7 @@ namespace actions {
 		 * dispersion in H < tol*freqScale*Jtotal */
 		TorusGenerator(const potential::BasePotential& _pot, const double _tol = 1e-9);
 		Torus fitTorus(const Actions&, const double tighten = 1) const;
+		Torus fitBaseTorus(const Actions&, const double tighten = 1) const;
 		Torus fitFrom(const Actions&, const Torus&, const double tighten = 1) const;
 		eTorus fiteTorus(const Actions&, const potential::BasePotential* _addPhi = NULL);
 		eTorus fiteTorus(const Actions&, const double, const potential::BasePotential* _addPhi = NULL);
@@ -302,10 +310,13 @@ namespace actions {
 		//virtual Actions actions(const coord::PosMomCyl& point) const;
 		virtual ActionAngles actionAngles(const coord::PosVelCyl& point,
 			Frequencies* freq = NULL) const;
+		virtual ActionAngles actionAngles2(const coord::PosVelCyl& point,
+			Frequencies* freq = NULL) const;
+		virtual ActionAngles actionAngles3(const coord::PosVelCyl& point,
+			Frequencies* freq = NULL) const;
 		virtual Actions actions(const coord::PosVelCyl& point) const {
 			return Actions(actionAngles(point));
 		}
-		virtual ActionAngles actionAngles2(const coord::PosVelCyl& point, Frequencies* freq = NULL) const;
 	};
 
 }//namespace actions
