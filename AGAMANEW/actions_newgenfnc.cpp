@@ -7,6 +7,60 @@ namespace actions {
 
 	namespace { // internal
 
+		/// return the absolute value of an element in a map, or zero if it doesn't exist
+		static inline double absvalue(const std::map< std::pair<int, int>, double >& indPairs, int ir, int iz)
+		{
+			if (indPairs.find(std::make_pair(ir, iz)) != indPairs.end())
+				return fabs(indPairs.find(std::make_pair(ir, iz))->second);
+			else
+				return 0;
+		}
+
+		/// return the value of an element in a map, or zero if it doesn't exist
+		static inline double value(const std::map< std::pair<int, int>, double >& indPairs, int ir, int iz)
+		{
+			if (indPairs.find(std::make_pair(ir, iz)) != indPairs.end())
+				return (indPairs.find(std::make_pair(ir, iz))->second);
+			else
+				return 0;
+		}
+
+		/// Does this series already have a fraction?
+		static bool haveFrac(const int iz, GenFncFitFracs& fracs) {// true if we already have iz frac
+			bool need = true;
+			for (unsigned int j = 0; j < fracs.size(); j++)
+				need &= (fracs[j].mz != iz);
+			return !need;
+		}
+
+		/// Should we add a fraction to this series?
+		static bool addFrac(std::map< std::pair<int, int>, double>& indPairs,
+			const int maxmr, const int iz, const int nrStart, const int nrBack,
+			double& B, double& bmean) {
+			unsigned int mr_last = 0;
+			for (int ir = maxmr; ir > 2; ir--) {//find highest term in this series
+				if (indPairs.find(std::make_pair(ir, iz)) != indPairs.end()) {
+					mr_last = ir; break;
+				}
+			}
+			if (mr_last < nrStart) return false; // too soon to introduce a frac
+			std::vector<double> b;
+			for (int j = 1; j < nrBack + 1;j++) {
+				b.push_back(value(indPairs, mr_last - j, iz) / value(indPairs, mr_last - j - 1, iz));
+				if (std::isnan(b.back()) || fabs(b.back()) > 0.9) return false; // still rising?
+			}
+			double bvar = 0; bmean = 0;
+			for (int i = 0;i < nrBack;i++) {
+				bvar += pow_2(b[i]); bmean += b[i];
+			}
+			bmean /= (double)nrBack;
+			if (bmean > 0.9) return false;
+			bvar = sqrt(bvar / (double)nrBack - pow_2(bmean));
+			if (bvar > 0.1) return false;
+			B = value(indPairs, mr_last - nrBack, iz) / pow(bmean, mr_last - nrBack - 1);
+			return true;
+		}
+
 		/// create an array of angles uniformly covering the range [0:pi]  (NB: why not 2pi?)
 		static std::vector<Angles> makeGridAngles(unsigned int nr, unsigned int nz, unsigned int nphi = 1)
 		{
@@ -26,22 +80,16 @@ namespace actions {
 		/// create grid in angles with size determined by the maximal Fourier harmonic in the indices array
 		static std::vector<Angles> makeGridAngles(const GenFncIndices& indices)
 		{
-			int maxmr = 4, maxmz = 4, maxmphi = 0;
+			//	int maxmr=4, maxmz=4, maxmphi=0;
+			int maxmr = 0, maxmz = 0, maxmphi = 0;
 			for (unsigned int i = 0; i < indices.size(); i++) {
 				maxmr = std::max<int>(maxmr, math::abs(indices[i].mr));
 				maxmz = std::max<int>(maxmz, math::abs(indices[i].mz));
 				maxmphi = std::max<int>(maxmphi, math::abs(indices[i].mphi));
 			}
-			return makeGridAngles(6 * (maxmr / 4 + 1), 6 * (maxmz / 4 + 1), maxmphi > 0 ? 6 * (maxmphi / 4 + 1) : 1);
-		}
-
-		/// return the absolute value of an element in a map, or zero if it doesn't exist
-		static inline double absvalue(const std::map< std::pair<int, int>, double >& indPairs, int ir, int iz)
-		{
-			if (indPairs.find(std::make_pair(ir, iz)) != indPairs.end())
-				return fabs(indPairs.find(std::make_pair(ir, iz))->second);
-			else
-				return 0;
+			maxmz /= 2;//because GF ~ sin(2*n*theta_z)
+			//	return makeGridAngles(8*(maxmr/4+1), 6*(maxmz/4+1), maxmphi>0 ? 6*(maxmphi/4+1) : 1);
+			return makeGridAngles(maxmr > 0 ? 6 * (maxmr / 4 + 1) : 2, 6 * (maxmz / 3 + 1), maxmphi > 0 ? 6 * (maxmphi + 1) : 1);
 		}
 
 		/** Helper class to be used in the iterative solution of a nonlinear system of equations
@@ -50,9 +98,7 @@ namespace actions {
 		*/
 		class AngleFinder : public math::IFunctionNdimDeriv {
 		public:
-			AngleFinder(const GenFncIndices& _indices, const GenFncDerivs& _dSby, const Angles& _ang) :
-				indices(_indices), dSby(_dSby), ang(_ang) {
-			}
+			AngleFinder(const GenFnc* _GF, const Angles& _ang) : GF(_GF), ang(_ang) {}
 			virtual unsigned int numVars() const { return 3; }
 			virtual unsigned int numValues() const { return 3; }
 
@@ -67,51 +113,162 @@ namespace actions {
 					derivs[0] = derivs[4] = derivs[8] = 1.;  // diagonal
 					derivs[1] = derivs[2] = derivs[3] = derivs[5] = derivs[6] = derivs[7] = 0;  // off-diag
 				}
-				for (unsigned int i = 0; i < indices.size(); i++) {
-					double arg = indices[i].mr * vars[0] + indices[i].mz * vars[1] +
-						indices[i].mphi * vars[2];    // argument of trig functions
+				for (unsigned int i = 0; i < GF->indices.size(); i++) {
+					double arg = GF->indices[i].mr * vars[0] + GF->indices[i].mz * vars[1] +
+						GF->indices[i].mphi * vars[2];    // argument of trig functions
 					if (values) {
 						double s = sin(arg);
-						values[0] += s * dSby[i].Jr;
-						values[1] += s * dSby[i].Jz;
-						values[2] += s * dSby[i].Jphi;
+						values[0] += s * GF->derivs[i].Jr;
+						values[1] += s * GF->derivs[i].Jz;
+						values[2] += s * GF->derivs[i].Jphi;
 					}
 					if (derivs) {
 						double c = cos(arg);
-						derivs[0] += c * dSby[i].Jr * indices[i].mr;
-						derivs[1] += c * dSby[i].Jr * indices[i].mz;
-						derivs[2] += c * dSby[i].Jr * indices[i].mphi;
-						derivs[3] += c * dSby[i].Jz * indices[i].mr;
-						derivs[4] += c * dSby[i].Jz * indices[i].mz;
-						derivs[5] += c * dSby[i].Jz * indices[i].mphi;
-						derivs[6] += c * dSby[i].Jphi * indices[i].mr;
-						derivs[7] += c * dSby[i].Jphi * indices[i].mz;
-						derivs[8] += c * dSby[i].Jphi * indices[i].mphi;
+						derivs[0] += c * GF->derivs[i].Jr * GF->indices[i].mr;
+						derivs[1] += c * GF->derivs[i].Jr * GF->indices[i].mz;
+						derivs[2] += c * GF->derivs[i].Jr * GF->indices[i].mphi;
+						derivs[3] += c * GF->derivs[i].Jz * GF->indices[i].mr;
+						derivs[4] += c * GF->derivs[i].Jz * GF->indices[i].mz;
+						derivs[5] += c * GF->derivs[i].Jz * GF->indices[i].mphi;
+						derivs[6] += c * GF->derivs[i].Jphi * GF->indices[i].mr;
+						derivs[7] += c * GF->derivs[i].Jphi * GF->indices[i].mz;
+						derivs[8] += c * GF->derivs[i].Jphi * GF->indices[i].mphi;
+					}
+				}
+				for (unsigned int j = 0; j < GF->fracs.size(); j++) {
+					Angles thetaT(vars[0], vars[1], vars[2]);
+					if (values) {
+						double F, BdFdpsi;  GF->fracs[j].dBFdP(thetaT, F, BdFdpsi);
+						values[0] += GF->fracs[j].dBdJ.Jr * F + GF->fracs[j].dpsidJ.Jr * BdFdpsi;
+						values[1] += GF->fracs[j].dBdJ.Jz * F + GF->fracs[j].dpsidJ.Jz * BdFdpsi;
+						values[2] += GF->fracs[j].dBdJ.Jphi * F + GF->fracs[j].dpsidJ.Jphi * BdFdpsi;
+					}
+					if (derivs) {//Note that b is replaced by psi in dSby and dJTb
+						Actions dJTdB, dJTdpsi; GF->fracs[j].derivJ(thetaT, dJTdB, dJTdpsi);
+						derivs[0] += GF->fracs[j].dBdJ.Jr * dJTdB.Jr + GF->fracs[j].dpsidJ.Jr * dJTdpsi.Jr;
+						derivs[1] += GF->fracs[j].dBdJ.Jr * dJTdB.Jz + GF->fracs[j].dpsidJ.Jr * dJTdpsi.Jz;
+						derivs[2] += GF->fracs[j].dBdJ.Jr * dJTdB.Jphi + GF->fracs[j].dpsidJ.Jr * dJTdpsi.Jphi;
+						derivs[3] += GF->fracs[j].dBdJ.Jz * dJTdB.Jr + GF->fracs[j].dpsidJ.Jr * dJTdpsi.Jr;
+						derivs[4] += GF->fracs[j].dBdJ.Jz * dJTdB.Jz + GF->fracs[j].dpsidJ.Jr * dJTdpsi.Jz;
+						derivs[5] += GF->fracs[j].dBdJ.Jz * dJTdB.Jphi + GF->fracs[j].dpsidJ.Jr * dJTdpsi.Jphi;
+						derivs[6] += GF->fracs[j].dBdJ.Jphi * dJTdB.Jr + GF->fracs[j].dpsidJ.Jr * dJTdpsi.Jr;
+						derivs[7] += GF->fracs[j].dBdJ.Jphi * dJTdB.Jz + GF->fracs[j].dpsidJ.Jr * dJTdpsi.Jz;
+						derivs[8] += GF->fracs[j].dBdJ.Jphi * dJTdB.Jphi + GF->fracs[j].dpsidJ.Jr * dJTdpsi.Jphi;
 					}
 				}
 			}
 		private:
-			const GenFncIndices& indices; ///< indices of terms in generating function
-			const GenFncDerivs& dSby;     ///< amplitudes of derivatives dS/dJ_{r,z,phi}
+			const GenFnc* GF;
 			const Angles ang;             ///< true angles
 		};
 
 	} // internal namespace
+
+	//contribution to JT = B dF/dtheta
+	Actions GenFncFitFrac::dJ(const double* p, const Angles& theta) const {
+		double B = p[0], b = tanh(p[1]);
+		std::complex<double> tz(exp(std::complex<double>(0, mz * theta.thetaz)));
+		std::complex<double> tr(exp(std::complex<double>(0, theta.thetar)));
+		std::complex<double> onembtr(std::complex<double>(1, 0) - b * tr);
+		return Actions(B * real(tz * tr / pow_2(onembtr)), B * mz * real(tr * tz / onembtr), 0);
+	}
+
+	// dJT/dB=dF/dthetaT or dJT/dpsi = dJT/db*(1-b^2) and note dJT/db=Bd^2F/dbdthetaT
+	Actions GenFncFitFrac::derivJ(const double* p, bool wrtB, const Angles& theta) const {
+		const double B = p[0], b = tanh(p[1]), onembsq = 1 - b * b;
+		std::complex<double> tz(exp(std::complex<double>(0, mz * theta.thetaz)));
+		std::complex<double> tr(exp(std::complex<double>(0, theta.thetar)));
+		std::complex<double> onembtr(std::complex<double>(1, 0) - b * tr);
+		Actions dJ(0, 0, 0);
+		if (wrtB) {		//dif JT wrt B
+			dJ.Jz = mz * real(tr * tz / onembtr);
+			dJ.Jr = real(tr * tz / pow_2(onembtr));
+		}
+		else {		//dif JT wrt b
+			std::complex<double> Z(tr * tr * tz / pow_2(onembtr));
+			dJ.Jz = mz * B * onembsq * real(Z);
+			dJ.Jr = 2 * B * onembsq * real(Z / onembtr);
+		}
+		return dJ;
+	}
+
+	// contribution to JT
+	Actions GenFncFrac::dJ(const Angles& theta) const {//contribution to JT
+		std::complex<double> tz(exp(std::complex<double>(0, mz * theta.thetaz)));
+		std::complex<double> tr(exp(std::complex<double>(0, theta.thetar)));
+		std::complex<double> onembtr(std::complex<double>(1, 0) - b * tr);
+		return Actions(B * real(tz * tr / pow_2(onembtr)), B * mz * real(tr * tz / onembtr), 0);
+	}
+
+	// dJT/dB=dF/dthetaT or dJT/dpsi = dJT/db*(1-b^2) and note dJT/db=Bd^2F/dbdthetaT
+	void GenFncFrac::derivJ(const Angles& theta, Actions& dJTdB, Actions& dJTdpsi) const {
+		std::complex<double> tz(exp(std::complex<double>(0, mz * theta.thetaz)));
+		std::complex<double> tr(exp(std::complex<double>(0, theta.thetar)));
+		std::complex<double> onembtr(std::complex<double>(1, 0) - b * tr);
+		std::complex<double> Z(tr * tr * tz / pow_2(onembtr));
+		dJTdB.Jz = mz * real(tr * tz / onembtr);
+		dJTdB.Jr = real(tr * tz / pow_2(onembtr));
+		dJTdB.Jphi = 0;
+		dJTdpsi.Jz = mz * B * onembsq * real(Z);
+		dJTdpsi.Jr = 2 * B * onembsq * real(Z / onembtr);
+		dJTdpsi.Jphi = 0;
+	}
+
+	//coeffs of dB/dJ, db/dJ in findAngle
+	void GenFncFrac::dBFdP(const Angles& theta, double& rF, double& rBdFdpsi) const {
+		std::complex<double> tz(exp(std::complex<double>(0, mz * theta.thetaz)));
+		std::complex<double> tr(exp(std::complex<double>(0, theta.thetar)));
+		std::complex<double> onembtr(std::complex<double>(1, 0) - b * tr);
+		std::complex<double> F = tr * tz / onembtr;
+		rF = imag(F);
+		rBdFdpsi = B * onembsq * imag(F * tr / onembtr);
+	}
+	void GenFncFrac::d2dtheta2(const Angles& theta, double& drr, double& dzz, double& dphiphi,
+		double& drz, double& drphi, double& dzphi) const {
+		std::complex<double> tz(exp(std::complex<double>(0, mz * theta.thetaz)));
+		std::complex<double> tr(exp(std::complex<double>(0, theta.thetar)));
+		std::complex<double> onembtr(std::complex<double>(1, 0) - b * tr);
+		std::complex<double> BF = B * tr * tz / onembtr;
+		drr = -imag(BF * (std::complex<double>(1, 0) + b * tr) / pow_2(onembtr));
+		dzz = -mz * mz * imag(BF);
+		dphiphi = -mphi * mphi * imag(BF);
+		drz = -mz * imag(BF / onembtr);
+		drphi = -mphi * imag(BF / onembtr);
+		dzphi = -mz * mphi * imag(BF);
+	}
+
 	void GenFnc::write(FILE* ofile) const {
-		fprintf(ofile, "%zd\n", indices.size());
+		fprintf(ofile, "%zd %zd\n", indices.size(), fracs.size());
 		for (int i = 0; i < indices.size(); i++)
 			fprintf(ofile, "%d %d %d %g %g %g %g\n",
 				indices[i].mr, indices[i].mz, indices[i].mphi,
 				values[i], derivs[i].Jr, derivs[i].Jz, derivs[i].Jphi);
+		for (int j = 0; j < fracs.size(); j++) {
+			fprintf(ofile, "%d %g %g\n", fracs[j].mz, fracs[j].B, fracs[j].b);
+			fprintf(ofile, "%g %g %g %g %g %g\n",
+				fracs[j].dBdJ.Jr, fracs[j].dBdJ.Jz, fracs[j].dBdJ.Jphi,
+				fracs[j].dpsidJ.Jr, fracs[j].dpsidJ.Jz, fracs[j].dpsidJ.Jphi);
+		}
 	}
 	void GenFnc::read(FILE* ifile) {
-		int n;
-		fscanf_s(ifile, "%d", &n);
-		indices.resize(n); values.resize(n); derivs.resize(n);
+		int nt, nf;
+		fscanf_s(ifile, "%d %d", &nt, &nf);
+		indices.resize(nt); values.resize(nt); derivs.resize(nt + 2 * nf); fracs.resize(nf);
 		for (int i = 0; i < indices.size(); i++)
-			fscanf_s(ifile, "%d %d %d %g %g %g %g\n",
+			fscanf_s(ifile, "%d %d %d %lg %lg %lg %lg\n",
 				&indices[i].mr, &indices[i].mz, &indices[i].mphi,
 				&values[i], &derivs[i].Jr, &derivs[i].Jz, &derivs[i].Jphi);
+		for (int j = 0; j < nf; j++) {
+			fscanf_s(ifile, "%d %lg %lg", &fracs[j].mz, &fracs[j].B, &fracs[j].b);
+			fscanf_s(ifile, "%lg %lg %lg %lg %lg %lg\n",
+				&fracs[j].dBdJ.Jr, &fracs[j].dBdJ.Jz, &fracs[j].dBdJ.Jphi,
+				&fracs[j].dpsidJ.Jr, &fracs[j].dpsidJ.Jz, &fracs[j].dpsidJ.Jphi);
+		}
+	}
+	void GenFnc::print(void) const {
+		for (int i = 0; i < values.size(); i++)
+			printf("(%d %d %d) %g  ", indices[i].mr, indices[i].mz, indices[i].mphi, values[i]);
+		printf("\n");
 	}
 
 	Actions GenFnc::toyJ(const Actions& J, const Angles& thetaT) const {//returns toyJ(thetaT)
@@ -124,9 +281,15 @@ namespace actions {
 			JT.Jz += val * indices[i].mz;
 			JT.Jphi += val * indices[i].mphi;
 		}
-		if (JT.Jr < 0 || JT.Jz < 0) {
+		for (unsigned int i = 0; i < fracs.size(); i++) {
+			Actions dJ(fracs[i].dJ(thetaT));
+			JT.Jr += dJ.Jr;
+			JT.Jz += dJ.Jz;
+			JT.Jphi += dJ.Jphi;
+		}
+		if (JT.Jr < 0 || JT.Jz < 0) {// prevent non-physical negative values
 			//printf("Ji<0 %f %f %f %f\n",JT.Jr,JT.Jz, thetaT.thetar, thetaT.thetaz);
-			JT.Jr = fmax(JT.Jr, 0); JT.Jz = fmax(JT.Jz, 0);    // prevent non-physical negative values
+			JT.Jr = fmax(JT.Jr, 0); JT.Jz = fmax(JT.Jz, 0);
 		}
 		return JT;
 	}
@@ -139,27 +302,32 @@ namespace actions {
 			theta.thetaz += derivs[i].Jz * sinT;
 			theta.thetaphi += derivs[i].Jphi * sinT;
 		}
-		return theta;
+		for (unsigned int i = 0; i < fracs.size(); i++) {
+			double F, BdFdpsi; fracs[i].dBFdP(thetaT, F, BdFdpsi);
+			theta.thetar += fracs[i].dBdJ.Jr * F + fracs[i].dpsidJ.Jr * BdFdpsi;
+			theta.thetaz += fracs[i].dBdJ.Jz * F + fracs[i].dpsidJ.Jz * BdFdpsi;
+			theta.thetaphi += fracs[i].dBdJ.Jphi * F + fracs[i].dpsidJ.Jphi * BdFdpsi;
+		}
+		return Angles(math::wrapAngle(theta.thetar), math::wrapAngle(theta.thetaz),
+			math::wrapAngle(theta.thetaphi));
 	}
 
 	Angles GenFnc::toyA(const Angles& theta) const {//real Angs -> toy Angs
 		double thetaT[3], Theta[3] = { theta.thetar, theta.thetaz, theta.thetaphi };
-		AngleFinder AF(indices, derivs, theta);
+		AngleFinder AF(this, theta);
 		int numIter = math::findRootNdimDeriv(AF, Theta, 1e-6, 10, thetaT);
-		if (numIter >= 10) printf("Max iterations in findRootNdimDeriv\n");
+		if (numIter >= 10) printf("GenFnc toyA: max iterations in findRootNdimDeriv\n");
 		return Angles(math::wrapAngle(thetaT[0]),
 			math::wrapAngle(thetaT[1]), math::wrapAngle(thetaT[2]));
 	}
+
 	ActionAngles GenFnc::true2toy(const ActionAngles& aa) const {
 		Angles thetaT(toyA(Angles(aa)));
 		Actions JT(toyJ(Actions(aa), thetaT));
 		return ActionAngles(JT, thetaT);
 	}
-	/*
-	void GenFnc::print(void) const{
-		for(int i=0; i<indices.size(); i++)
-			printf("%d %d %d %g\n",indices[i].mr,indices[i].mz,indices[i].mphi,values[i]);
-	}*/
+
+	//Derivs of actions wrt thetaT
 	DerivAng<coord::Cyl> GenFnc::dJdt(const Angles& thetaT) const {
 		DerivAng<coord::Cyl> D;
 		for (unsigned int i = 0; i < indices.size(); i++) {
@@ -181,9 +349,24 @@ namespace actions {
 			D.dbythetaz.phi -= indices[i].mphi * indices[i].mz * sinT;
 			D.dbythetaphi.phi -= indices[i].mphi * indices[i].mphi * sinT;
 		}
+		for (unsigned int j = 0; j < fracs.size(); j++) {
+			double drr, dzz, dphiphi, drz, drphi, dzphi;
+			fracs[j].d2dtheta2(thetaT, drr, dzz, dphiphi, drz, drphi, dzphi);
+			D.dbythetar.R += drr;
+			D.dbythetaz.R += drz;
+			D.dbythetaphi.R += drphi;
+			D.dbythetar.z += drz;
+			D.dbythetaz.z += dzz;
+			D.dbythetaphi.z += dzphi;
+			D.dbythetar.phi += drphi;
+			D.dbythetaz.phi += dzphi;
+			D.dbythetaphi.phi += dphiphi;
+		}
 		return D;
 	}
-	double GenFnc::dtbydtT_Jacobian(const Angles& thetaT, math::Matrix<double>& M) const {// dtheta_i/dthetaT_j
+
+	// dtheta_i/dthetaT_j  * NEES UPDATING FOR FRACs *
+	double GenFnc::dtbydtT_Jacobian(const Angles& thetaT, math::Matrix<double>& M) const {
 		M(0, 0) = M(1, 1) = M(2, 2) = 1; M(0, 1) = M(0, 2) = M(1, 2) = M(1, 0) = M(2, 0) = M(2, 1) = 0;
 		for (unsigned int i = 0; i < indices.size(); i++) {
 			double cosT = cos(indices[i].mr * thetaT.thetar
@@ -199,20 +382,186 @@ namespace actions {
 			M(2, 1) += derivs[i].Jphi * indices[i].mz * cosT;
 			M(2, 2) += derivs[i].Jphi * indices[i].mphi * cosT;
 		}
+		for (unsigned int j = 0; j < fracs.size(); j++) {
+			Actions dBdJ(fracs[j].dBdJ), dpsidJ(fracs[j].dpsidJ);
+			Actions dJTdB, dJTdpsi; fracs[j].derivJ(thetaT, dJTdB, dJTdpsi);
+			M(0, 0) += dBdJ.Jr * dJTdB.Jr + dpsidJ.Jr * dJTdpsi.Jr;
+			M(0, 1) += dBdJ.Jr * dJTdB.Jz + dpsidJ.Jr * dJTdpsi.Jz;
+			M(0, 2) += dBdJ.Jr * dJTdB.Jphi + dpsidJ.Jr * dJTdpsi.Jphi;
+			M(1, 0) += dBdJ.Jz * dJTdB.Jr + dpsidJ.Jz * dJTdpsi.Jr;
+			M(1, 1) += dBdJ.Jz * dJTdB.Jz + dpsidJ.Jz * dJTdpsi.Jz;
+			M(1, 2) += dBdJ.Jz * dJTdB.Jphi + dpsidJ.Jz * dJTdpsi.Jphi;
+			M(2, 0) += dBdJ.Jphi * dJTdB.Jr + dpsidJ.Jphi * dJTdpsi.Jr;
+			M(2, 1) += dBdJ.Jphi * dJTdB.Jz + dpsidJ.Jphi * dJTdpsi.Jz;
+			M(2, 2) += dBdJ.Jphi * dJTdB.Jphi + dpsidJ.Jphi * dJTdpsi.Jphi;
+		}
 		double det = M(0, 0) * (M(1, 1) * M(2, 2) - M(2, 1) * M(1, 2))
 			- M(1, 0) * (M(0, 1) * M(2, 2) - M(2, 1) * M(0, 2))
 			+ M(2, 0) * (M(0, 1) * M(1, 2) - M(1, 1) * M(0, 2));
 		return fabs(det);
 	}
 
-	void GenFnc::print(void) const {
-		for (int i = 0; i < values.size(); i++)
-			printf("(%d %d %d) %g  ", indices[i].mr, indices[i].mz, indices[i].mphi, values[i]);
-		printf("\n");
+	double GenFnc::giveValue(const GenFncIndex& ind) const {
+		for (int i = 0; i < indices.size(); i++) {
+			if (ind.mr != indices[i].mr) continue;
+			if (ind.mz != indices[i].mz) continue;
+			if (ind.mphi == indices[i].mphi) return values[i];
+		}
+		return NAN;
 	}
 
-	GenFncFit::GenFncFit(const GenFncIndices& _indices, const Actions& _acts) :
-		indices(_indices), acts(_acts)
+	std::pair<int, int> GenFnc::maxIndices() const {
+		int mr = 0, mz = 0;
+		for (int i = 0; i < indices.size(); i++) {
+			mr = std::max<int>(mr, std::abs(indices[i].mr));
+			mz = std::max<int>(mz, std::abs(indices[i].mz));
+		}
+		return std::make_pair(mr, mz);
+	}
+
+	GenFnc interpGenFnc(const double x, const GenFnc& GF1, const GenFnc& GF2) {
+		if (x == 1) return GenFnc(GF1);
+		if (x == 0) return GenFnc(GF2);
+		const double eps = .05, xp = 1 - x;
+		GenFnc G2(GF2);
+		GenFncIndices indices = GF1.indices;
+		std::vector<double> values = GF1.values;
+		GenFncDerivs derivs = GF1.derivs;
+		for (int i = 0; i < values.size(); i++) {
+			values[i] *= x; derivs[i] *= x;
+		}
+		for (int i = 0; i < indices.size(); i++) {
+			int mr = indices[i].mr, mz = indices[i].mz, mphi = indices[i].mphi;
+			std::vector<double>::iterator jt = G2.values.begin();
+			std::vector<Actions>::iterator kt = G2.derivs.begin();//find terms matching present ones
+			for (GenFncIndices::iterator it = G2.indices.begin(); it != G2.indices.end();) {
+				if (mr == (*it).mr && mz == (*it).mz && mphi == (*it).mphi) {
+					values[i] += xp * (*jt); derivs[i] += (*kt) * xp;
+					it = G2.indices.erase(it);
+					jt = G2.values.erase(jt);
+					kt = G2.derivs.erase(kt);
+					break;
+				}
+				else {
+					it++; jt++; kt++;
+				}
+			}
+		}
+		if (G2.indices.size() > 0) {
+			for (int j = 0; j < G2.indices.size(); j++) {
+				indices.push_back(G2.indices[j]);
+				values.push_back(G2.values[j]);
+				derivs.push_back(G2.derivs[j]);
+			}
+		}
+		GenFncFracs fracs = GF1.fracs;
+		for (int j = 0; j < fracs.size(); j++) {
+			int mz = fracs[j].mz, mphi = fracs[j].mphi; double b = fracs[j].b;
+			fracs[j].B *= x; fracs[j].dBdJ *= x;
+			for (GenFncFracs::iterator it = G2.fracs.begin(); it != G2.fracs.end();) {
+				if (mz == (*it).mz && mphi == (*it).mphi) {
+					if (fabs(b - (*it).b) < eps) {//essentally the same fraction;
+						fracs[j].B += xp * (*it).B;
+						fracs[j].dBdJ += (*it).dBdJ * xp;
+						fracs[j].dpsidJ += (*it).dpsidJ * xp;
+						fracs[j].b = x * fracs[j].b + xp * (*it).b;
+						fracs[j].onembsq = 1 - pow_2(fracs[j].b);
+						fracs[j].dpsidJ = fracs[j].dpsidJ * x + (*it).dpsidJ * xp;
+						it = G2.fracs.erase(it);
+					}
+					break;
+				}
+				else
+					it++;
+			}
+		}
+		if (G2.fracs.size() > 0) {
+			for (int j = 0; j < GF2.fracs.size(); j++)
+				fracs.push_back(GF2.fracs[j]);
+		}
+		return GenFnc(indices, values, derivs, fracs);
+	}
+	/*
+
+	GenFnc GenFnc::operator * (const double a) const{
+		std::vector<double> values2(values.size());
+		for(int i=0; i<values.size(); i++)
+			values2[i] = a*values[i];
+		std::vector<Actions> derivs2(derivs.size());
+		for(int i=0; i<derivs.size(); i++)
+			derivs2[i] = derivs[i]*a;
+		GenFncFracs fracs2;
+		for(int j=0; j<fracs.size(); j++)
+			fracs2.push_back(GenFncFrac(a*fracs[j].B, a*fracs[j].b,
+							   fracs[j].dBdJ*a, fracs[j].dpsidJ*a, fracs[j].mz));
+		GenFnc G2(indices, values2, derivs2, fracs2);
+		return G2;
+	}
+	GenFnc& GenFnc::operator *= (const double a){
+		for(int i=0; i<values.size(); i++)
+			values[i] *= a;
+		for(int i=0; i<derivs.size(); i++)
+			derivs[i] *= a;
+		for(int j=0; j<fracs.size(); j++){
+			fracs[j].B *= a; fracs[j].b *= a;
+			fracs[j].dBdJ *= a; fracs[j].dpsidJ *= a;
+			fracs[j].onembsq = 1-pow_2(fracs[j].b);
+		}
+		return *this;
+	}
+	GenFnc& GenFnc::operator += (const GenFnc& G){
+		GenFnc G2(G);
+		for(int i=0; i<indices.size(); i++){
+			int mr=indices[i].mr, mz=indices[i].mz, mphi=indices[i].mphi;
+			std::vector<double>::iterator jt = G2.values.begin();
+			std::vector<Actions>::iterator kt = G2.derivs.begin();//find terms matching present ones
+			for(GenFncIndices::iterator it =  G2.indices.begin(); it != G2.indices.end();){
+				if(mr==(*it).mr && mz==(*it).mz && mphi==(*it).mphi){
+					values[i] += (*jt); derivs[i] += (*kt);
+					it = G2.indices.erase(it);
+					jt = G2.values.erase(jt);
+					kt = G2.derivs.erase(kt);
+					break;
+				} else {
+					it++; jt++; kt++;
+				}
+			}
+		}
+		if(G2.indices.size() > 0){
+			for(int j=0; j<G2.indices.size(); j++){
+				indices.push_back(G2.indices[j]);
+				values.push_back(G2.values[j]);
+				derivs.push_back(G2.derivs[j]);
+			}
+		}
+		for(int j=0; j<fracs.size(); j++){
+			int mz=fracs[j].mz, mphi=fracs[j].mphi;
+			for(GenFncFracs::iterator it = G2.fracs.begin(); it != G2.fracs.end();){
+				if(mz == (*it).mz && mphi == (*it).mphi){
+					fracs[j].B += (*it).B; fracs[j].b += (*it).b;
+					fracs[j].dBdJ   += (*it).dBdJ;
+					fracs[j].dpsidJ += (*it).dpsidJ;
+					it = G2.fracs.erase(it);
+				} else
+					it++;
+			}
+		}
+		if(G2.fracs.size() > 0){
+			for(int j=0; j<G2.fracs.size(); j++)
+				fracs.push_back(G2.fracs[j]);
+		}
+		return *this;
+	}
+
+	GenFnc GenFnc::operator + (const GenFnc& GF) const{
+		GenFnc G2 = *this;
+		G2 += GF;
+		return G2;
+	}
+	*/
+	GenFncFitSeries::GenFncFitSeries(const GenFncIndices& _indices, const GenFncFitFracs& _fracs,
+		const Actions& _acts) :
+		indices(_indices), fracs(_fracs), acts(_acts)
 	{
 		angs = makeGridAngles(indices);
 		coefs = math::Matrix<double>(angs.size(), indices.size());
@@ -225,7 +574,20 @@ namespace actions {
 					indices[indexCoef].mphi * angs[indexAngle].thetaphi);
 	}
 
-	ActionAngles GenFncFit::toyActionAngles(unsigned int indexAngle, const double values[]) const
+	std::pair<int, int> GenFncFitSeries::maxIndices() const {
+		int mr = 0, mz = 0;
+		for (int i = 0; i < indices.size(); i++) {
+			mr = std::max<int>(mr, std::abs(indices[i].mr));
+			mz = std::max<int>(mz, std::abs(indices[i].mz));
+		}
+		return std::make_pair(mr, mz);
+	}
+
+
+	/* To handle long series in theta_r we add
+	 * exp(i*(theta_r + m*theta_z))/(1-b*exp(i*theta_r)) with b=tanh(psi) to keep |b|<1
+	*/
+	ActionAngles GenFncFitSeries::toyActionAngles(unsigned int indexAngle, const double values[]) const
 	{
 		ActionAngles aa(acts, angs[indexAngle]);
 		for (unsigned int indexCoef = 0; indexCoef < indices.size(); indexCoef++) {
@@ -234,81 +596,84 @@ namespace actions {
 			aa.Jz += val * indices[indexCoef].mz;
 			aa.Jphi += val * indices[indexCoef].mphi;
 		}
-		// non-physical negative actions may appear,
-		// which means that these values of parameters are unsuitable.
+		unsigned int fracNum = 0;
+		for (unsigned int indexCoef = indices.size(); indexCoef < numParams(); indexCoef += 2) {
+			Actions dJ(fracs[fracNum].dJ(&values[indexCoef], angs[indexAngle]));
+			aa.Jr += dJ.Jr;
+			aa.Jz += dJ.Jz;
+			fracNum++;
+		}
 		return aa;
 	}
-	void GenFncFit::print(const std::vector<double>& params) const {
-		for (int i = 0; i < params.size(); i++)
+	Actions GenFncFitSeries::deriv(const unsigned int indexAngle, const unsigned int indexCoef,
+		const double values[]) const {
+		Actions dJ;
+		if (indexCoef < indices.size()) {//Dif wrt S_k
+			double val = coefs(indexAngle, indexCoef);  // no range check performed!
+			return Actions(
+				val * indices[indexCoef].mr,
+				val * indices[indexCoef].mz,
+				val * indices[indexCoef].mphi);
+		}
+		else {//dif wrt parameter B or psi of a fraction
+			int fracNum = (indexCoef - indices.size()) / 2, k = (indexCoef - indices.size()) % 2;
+			return fracs[fracNum].derivJ
+			(&values[indices.size() + 2 * fracNum], k == 0, angs[indexAngle]);
+		}
+	}
+	void GenFncFitSeries::print(const std::vector<double>& params) const {
+		printf("Fourier oeffs\n");
+		for (int i = 0; i < indices.size(); i++)
 			printf("(%d %d %d) %g  ", indices[i].mr, indices[i].mz, indices[i].mphi, params[i]);
 		printf("\n");
+		printf("Fractions\n");
+		for (int i = 0; i < fracs.size(); i++)
+			printf("m: %d, B: %g, b: %g\n",
+				fracs[i].mz, params[indices.size() + 2 * i], params[indices.size() + 2 * i + 1]);
 	}
-	GenFnc GenFnc::operator * (const double a) const {
-		std::vector<double> values2(values.size());
-		for (int i = 0; i < values.size(); i++)
-			values2[i] = a * values[i];
-		std::vector<Actions> derivs2(derivs.size());
-		for (int i = 0; i < derivs.size(); i++)
-			derivs2[i] = derivs[i] * a;
-		GenFnc G2(indices, values2, derivs2);
-		return G2;
+	void GenFncFitSeries::write(FILE* ofile, const std::vector<double>& params) const {
+		fprintf(ofile, "%zd\n", indices.size());
+		for (int i = 0; i < indices.size(); i++)
+			fprintf(ofile, "%d %d %d %g\n", indices[i].mr, indices[i].mz, indices[i].mphi, params[i]);
+		fprintf(ofile, "%zd\n", fracs.size());
+		for (int i = 0; i < fracs.size(); i++)
+			fprintf(ofile, "%d %g %g\n",//mz, B, b
+				fracs[i].mz, params[indices.size() + 2 * i], params[indices.size() + 2 * i + 1]);
 	}
-	GenFnc& GenFnc::operator *= (const double a) {
-		for (int i = 0; i < values.size(); i++)
-			values[i] *= a;
-		for (int i = 0; i < derivs.size(); i++)
-			derivs[i] *= a;
-		return *this;
-	}
-	GenFnc& GenFnc::operator += (const GenFnc& G) {
-		GenFnc G2(G);
-		for (int i = 0; i < indices.size(); i++) {
-			int mr = indices[i].mr, mz = indices[i].mz, mphi = indices[i].mphi;
-			std::vector<double>::iterator jt = G2.values.begin();
-			std::vector<Actions>::iterator kt = G2.derivs.begin();//find terms matching present ones
-			for (GenFncIndices::iterator it = G2.indices.begin(); it != G2.indices.end();) {
-				if (mr == (*it).mr && mz == (*it).mz && mphi == (*it).mphi) {
-					values[i] += (*jt); derivs[i] += (*kt);
-					it = G2.indices.erase(it);
-					jt = G2.values.erase(jt);
-					kt = G2.derivs.erase(kt);
-					break;
-				}
-				else {
-					it++; jt++; kt++;
-				}
-			}
-			//printf("(%zd %zd %zd) ",G2.indices.size(),G2.values.size(),G2.derivs.size());
+	void GenFncFitSeries::read(FILE* ifile, std::vector<double>& params) {
+		indices.clear(); params.clear();
+		int mr, mz, mphi; double p;
+		int sI; fscanf_s(ifile, "%d", &sI);
+		for (int i = 0; i < sI; i++) {
+			fscanf_s(ifile, "%d %d %d %lg", &mr, &mz, &mphi, &p);
+			indices.push_back(GenFncIndex(mr, mz, mphi));
+			params.push_back(p);
 		}
-		if (G2.indices.size() > 0) {
-			for (int j = 0; j < G2.indices.size(); j++) {
-				indices.push_back(G2.indices[j]);
-				values.push_back(G2.values[j]);
-				derivs.push_back(G2.derivs[j]);
-			}
+		printf("Read %zd terms\n", params.size());
+		int nf; double B, b;
+		fscanf_s(ifile, "%d", &nf);
+		for (int i = 0; i < nf; i++) {
+			fscanf_s(ifile, "%d %lg %lg", &mz, &B, &b);
+			fracs.push_back(GenFncFitFrac(mz));
+			params.push_back(B); params.push_back(b);
 		}
-		return *this;
+		printf("Read %zd fracs\n", fracs.size());
 	}
 
-	GenFnc GenFnc::operator + (const GenFnc& GF) const {
-		GenFnc G2 = *this;
-		G2 += GF;
-		return G2;
-	}
-
-	GenFncIndices GenFncFit::expand(const std::vector<double>& params)
+	GenFncIndices GenFncFitSeries::expand(std::vector<double>& params, GenFncFitFracs& fracs)
 	{   /// NOTE: here we specialize for the case of axisymmetric systems!
 		assert(params.size() == numParams());
 		std::map< std::pair<int, int>, double > indPairs;
+		int numaddTerm = 0, numaddFrac = 0;
+		GenFncIndices newIndices(indices);
 
-		// 1. determine the extent of existing grid in (mr,mz)
+		// 1. Store amplitudes & determine the extent of existing grid in (mr,mz)
 		int maxmr = 0, maxmz = 0;
 		for (unsigned int i = 0; i < indices.size(); i++) {
 			indPairs[std::make_pair(indices[i].mr, indices[i].mz)] = params[i];
 			maxmr = std::max<int>(maxmr, math::abs(indices[i].mr));
 			maxmz = std::max<int>(maxmz, math::abs(indices[i].mz));
 		}
-		GenFncIndices newIndices = indices;
 		/*if(maxmz==0) {  // dealing with the case Jz==0 -- add only two elements in m_r
 			newIndices.push_back(GenFncIndex(maxmr+1, 0, 0));
 			newIndices.push_back(GenFncIndex(maxmr+2, 0, 0));
@@ -317,23 +682,56 @@ namespace actions {
 
 		// 2. determine the largest amplitude of coefs that are at the boundary of existing values
 		double maxval = 0;
-		for (int ir = 0; ir <= maxmr + 2; ir++)
-			for (int iz = -maxmz - 2; iz <= maxmz + 2; iz += 2) {
-				if (indPairs.find(std::make_pair(ir, iz)) != indPairs.end() &&
-					((iz <= 0 && indPairs.find(std::make_pair(ir, iz - 2)) == indPairs.end()) ||
-						(iz >= 0 && indPairs.find(std::make_pair(ir, iz + 2)) == indPairs.end()) ||
-						indPairs.find(std::make_pair(ir + 1, iz)) == indPairs.end()))
-					maxval = fmax(fabs(indPairs[std::make_pair(ir, iz)]), maxval);
+		//note terms that are not themselves off end, but have a neighbour that is
+		for (int ir = 0; ir <= maxmr; ir++) {
+			if (maxmr > 0) {
+				for (int iz = -maxmz; iz <= maxmz; iz += 2) {
+					if (indPairs.find(std::make_pair(ir, iz)) != indPairs.end() &&
+						((iz <= 0 && indPairs.find(std::make_pair(ir, iz - 2)) == indPairs.end()) ||
+							(iz >= 0 && indPairs.find(std::make_pair(ir, iz + 2)) == indPairs.end()) ||
+							indPairs.find(std::make_pair(ir + 1, iz)) == indPairs.end()))
+						maxval = fmax(fabs(indPairs[std::make_pair(ir, iz)]), maxval);
+				}
 			}
+			else {
+				//for(int iz=-maxmz; iz<=maxmz; iz+=2*maxmz)
+				maxval = fabs(indPairs[std::make_pair(0, -maxmz)]);
+			}
+		}
 
-		// 3. add more terms adjacent to the existing ones at the boundary, if they are large enough
+
+		// 3. Add fractions if appropriate
+		std::vector<double> fracPs;
+		for (unsigned int j = 0; j < fracs.size(); j++) {//store params associated with existing fracs
+			int k = indices.size() + 2 * j;
+			fracPs.push_back(params[k]); params[k] = 0;
+			fracPs.push_back(params[k + 1]); params[k + 1] = 0;
+		}
+		//first attempt fit when reach S_nrStart and use terms from S_{nrStart-nrBack}
+		int nrStart = 18, nrBack = 5;
+		for (int iz = -2; iz <= 4; iz += 2) {// run over ir-series
+			if (haveFrac(iz, fracs)) continue;//continue if we already have a frac
+			double B, b;
+			if (!addFrac(indPairs, maxmr, iz, nrStart, nrBack, B, b)) continue;
+			for (int i = 0; i < indices.size(); i++) {// Subtract power captured by frac
+				if (indices[i].mz == iz)
+					params[i] -= B * pow(b, indices[i].mr - 1);
+			}
+			numaddFrac++;
+			fracs.push_back(GenFncFitFrac(iz));
+			fracPs.push_back(B); fracPs.push_back(.5 * log((1 + b) / (1 - b)));//b = tanh(psi) 
+		}
+
+		// 4. add more terms adjacent to the existing ones at the boundary, if they are large enough
 		double thresh = maxval * 0.1;
-		int numadd = 0;
-		for (int ir = 0; ir <= maxmr + 2; ir++)
-			for (int iz = -maxmz - 2; iz <= maxmz + 2; iz += 2) {
-				if (indPairs.find(std::make_pair(ir, iz)) != indPairs.end() || (ir == 0 && iz >= 0))
-					continue;  // already exists or not required
-				if (absvalue(indPairs, ir - 2, iz) >= thresh ||
+		int mstop = maxmr == 0 ? 0 : maxmr + 3;
+		for (int iz = -maxmz - 2; iz <= maxmz + 2; iz += 2) {
+			if (haveFrac(iz, fracs)) continue;//skip if we already have a frac
+			for (int ir = 0; ir <= mstop; ir++) {
+				if (indPairs.find(std::make_pair(ir, iz)) != indPairs.end()
+					|| (ir == 0 && iz >= 0)) continue;  // already exists or not required
+				if (absvalue(indPairs, ir - 3, iz) >= thresh ||
+					absvalue(indPairs, ir - 2, iz) >= thresh ||
 					absvalue(indPairs, ir - 1, iz) >= thresh ||
 					absvalue(indPairs, ir, iz - 2) >= thresh ||
 					absvalue(indPairs, ir, iz + 2) >= thresh ||
@@ -342,13 +740,16 @@ namespace actions {
 					absvalue(indPairs, ir + 1, iz) >= thresh)
 				{   // add a term if any of its neighbours are large enough
 					newIndices.push_back(GenFncIndex(ir, iz, 0));
-					numadd++;
+					numaddTerm++;
 				}
 			}
+		}
 
 		// 4. finish up
-		assert(numadd > 0);
+		//printf("Added %d terms, %d fracs\n",numaddTerm,numaddFrac);
+		params.resize(newIndices.size() + 2 * fracs.size(), 0);
+		for (int i = 0; i < fracPs.size(); i++)//copy prameters of fracs to end of params
+			params[newIndices.size() + i] = fracPs[i];
 		return newIndices;
 	}
-
 }  // namespace actions
